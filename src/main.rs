@@ -153,3 +153,18 @@ fn main() {
     server.add_service(lb);
     server.run_forever();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_for_window_reuses_same_arc_per_window() {
+        let r1 = rate_for_window(1);
+        let r2 = rate_for_window(1);
+        let r3 = rate_for_window(2);
+
+        assert!(Arc::ptr_eq(&r1, &r2));
+        assert!(!Arc::ptr_eq(&r1, &r3));
+    }
+}

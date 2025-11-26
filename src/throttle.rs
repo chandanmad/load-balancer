@@ -22,3 +22,16 @@ impl Ratelimit for DummyRatelimit {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dummy_ratelimit_returns_defaults() {
+        let limiter = DummyRatelimit;
+        let limit = limiter.limit_for_key("any-key");
+        assert_eq!(limit.quota, 5);
+        assert_eq!(limit.per_seconds, 1);
+    }
+}

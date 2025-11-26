@@ -43,3 +43,41 @@ impl Metrics {
             / 60
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minute_bucket_groups_by_60_seconds() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(59);
+        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(60);
+        assert_eq!(Metrics::minute_bucket(t0), 0);
+        assert_eq!(Metrics::minute_bucket(t1), 1);
+    }
+
+    #[test]
+    fn record_and_snapshot_counts() {
+        let metrics = Metrics::new();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
+        let t1 = SystemTime::UNIX_EPOCH + Duration::from_secs(65);
+
+        metrics.record_at("k", 200, t0);
+        metrics.record_at("k", 429, t0);
+        metrics.record_at("k", 200, t1);
+
+        let snap = metrics.snapshot("k");
+        let first_min = snap.get(&0).unwrap();
+        let second_min = snap.get(&1).unwrap();
+
+        assert_eq!(first_min.get(&200), Some(&1));
+        assert_eq!(first_min.get(&429), Some(&1));
+        assert_eq!(second_min.get(&200), Some(&1));
+    }
+
+    #[test]
+    fn snapshot_unknown_key_is_empty() {
+        let metrics = Metrics::new();
+        assert!(metrics.snapshot("missing").is_empty());
+    }
+}
