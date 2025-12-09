@@ -1,16 +1,3 @@
-[package]
-name = "load-balancer"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-async-trait = "0.1"
-env_logger = "0.11.8"
-pingora = { version = "0.6.0", features = ["lb", "proxy", "time"] }
-pingora-limits = "0.6.0"
-
-[dev-dependencies]
-axum = "0.7"
-reqwest = { version = "0.12", features = ["json"] }
-serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "sync"] }
+[workspace]
+resolver = "2"
+members = ["crates/load-balancer"]
