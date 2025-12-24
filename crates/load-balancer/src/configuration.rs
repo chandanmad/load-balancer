@@ -1,6 +1,11 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ServerConfig {
+    pub backend: String,
+}
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -12,7 +17,11 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigError::UndefinedService(s) => {
-                write!(f, "Service '{}' referenced in backend but not defined in services", s)
+                write!(
+                    f,
+                    "Service '{}' referenced in backend but not defined in services",
+                    s
+                )
             }
             ConfigError::UnusedService(s) => {
                 write!(f, "Service '{}' defined but has no backend", s)
@@ -120,12 +129,18 @@ mod tests {
         // Check first backend
         let b1 = &config.backends[0];
         assert_eq!(b1.service, "geocode_suggest");
-        assert_eq!(config.services.get(&b1.service).map(|s| s.as_str()), Some("/geocode/suggest"));
+        assert_eq!(
+            config.services.get(&b1.service).map(|s| s.as_str()),
+            Some("/geocode/suggest")
+        );
         if let Backend::Hetzner { labels, port } = &b1.backend {
             assert_eq!(*port, 8099);
             assert_eq!(labels.len(), 1);
             assert_eq!(labels[0].get("env").map(|s| s.as_str()), Some("prod"));
-            assert_eq!(labels[0].get("service").map(|s| s.as_str()), Some("geocode"));
+            assert_eq!(
+                labels[0].get("service").map(|s| s.as_str()),
+                Some("geocode")
+            );
         } else {
             panic!("Expected Hetzner backend");
         }
@@ -133,7 +148,10 @@ mod tests {
         // Check last backend
         let b4 = &config.backends[3];
         assert_eq!(b4.service, "geocode_reverse");
-        assert_eq!(config.services.get(&b4.service).map(|s| s.as_str()), Some("/geocode/reverse"));
+        assert_eq!(
+            config.services.get(&b4.service).map(|s| s.as_str()),
+            Some("/geocode/reverse")
+        );
         if let Backend::Basic { ip, port } = &b4.backend {
             assert_eq!(ip, "10.120.32.12");
             assert_eq!(*port, 8099);
@@ -212,12 +230,18 @@ mod tests {
         // Check first backend
         let b1 = &config.backends[0];
         assert_eq!(b1.service, "geocode_suggest");
-        assert_eq!(config.services.get(&b1.service).map(|s| s.as_str()), Some("/geocode/suggest"));
+        assert_eq!(
+            config.services.get(&b1.service).map(|s| s.as_str()),
+            Some("/geocode/suggest")
+        );
         if let Backend::Hetzner { labels, port } = &b1.backend {
             assert_eq!(*port, 8099);
             assert_eq!(labels.len(), 1);
             assert_eq!(labels[0].get("env").map(|s| s.as_str()), Some("prod"));
-            assert_eq!(labels[0].get("service").map(|s| s.as_str()), Some("geocode"));
+            assert_eq!(
+                labels[0].get("service").map(|s| s.as_str()),
+                Some("geocode")
+            );
         } else {
             panic!("Expected Hetzner backend");
         }
@@ -225,7 +249,10 @@ mod tests {
         // Check last backend
         let b4 = &config.backends[3];
         assert_eq!(b4.service, "geocode_reverse");
-        assert_eq!(config.services.get(&b4.service).map(|s| s.as_str()), Some("/geocode/reverse"));
+        assert_eq!(
+            config.services.get(&b4.service).map(|s| s.as_str()),
+            Some("/geocode/reverse")
+        );
         if let Backend::Basic { ip, port } = &b4.backend {
             assert_eq!(ip, "10.120.32.12");
             assert_eq!(*port, 8099);
