@@ -1,10 +1,40 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("Service '{0}' referenced in backend but not defined in services")]
+    UndefinedService(String),
+    #[error("Service '{0}' defined but has no backend")]
+    UnusedService(String),
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub services: HashMap<String, String>,
     pub backends: Vec<BackendConfig>,
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let mut used_services: HashSet<&String> = HashSet::new();
+
+        for backend in &self.backends {
+            if !self.services.contains_key(&backend.service) {
+                return Err(ConfigError::UndefinedService(backend.service.clone()));
+            }
+            used_services.insert(&backend.service);
+        }
+
+        for service in self.services.keys() {
+            if !used_services.contains(service) {
+                return Err(ConfigError::UnusedService(service.clone()));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +99,7 @@ mod tests {
         "#;
 
         let config: Config = serde_yaml::from_str(yaml_data).expect("Failed to deserialize config");
+        assert!(config.validate().is_ok());
 
         assert_eq!(config.services.len(), 3);
         assert_eq!(config.backends.len(), 4);
@@ -160,6 +191,7 @@ mod tests {
         "#;
 
         let config: Config = serde_json::from_str(json_data).expect("Failed to deserialize config");
+        assert!(config.validate().is_ok());
 
         assert_eq!(config.services.len(), 3);
         assert_eq!(config.backends.len(), 4);
@@ -186,6 +218,45 @@ mod tests {
             assert_eq!(*port, 8099);
         } else {
             panic!("Expected Basic backend");
+        }
+    }
+
+    #[test]
+    fn test_validate_undefined_service() {
+        let yaml_data = r#"
+        services:
+          geocode_suggest: /geocode/suggest
+        backends:
+          - service: unknown_service
+            backend:
+              type: basic
+              ip: 10.120.32.12
+              port: 8099
+        "#;
+        let config: Config = serde_yaml::from_str(yaml_data).expect("Failed to deserialize config");
+        match config.validate() {
+            Err(ConfigError::UndefinedService(s)) => assert_eq!(s, "unknown_service"),
+            _ => panic!("Expected UndefinedService error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_unused_service() {
+        let yaml_data = r#"
+        services:
+          geocode_suggest: /geocode/suggest
+          unused_service: /unused
+        backends:
+          - service: geocode_suggest
+            backend:
+              type: basic
+              ip: 10.120.32.12
+              port: 8099
+        "#;
+        let config: Config = serde_yaml::from_str(yaml_data).expect("Failed to deserialize config");
+        match config.validate() {
+            Err(ConfigError::UnusedService(s)) => assert_eq!(s, "unused_service"),
+            _ => panic!("Expected UnusedService error"),
         }
     }
 }
