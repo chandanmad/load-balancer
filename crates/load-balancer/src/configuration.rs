@@ -1,14 +1,27 @@
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use thiserror::Error;
+use std::fmt;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ConfigError {
-    #[error("Service '{0}' referenced in backend but not defined in services")]
     UndefinedService(String),
-    #[error("Service '{0}' defined but has no backend")]
     UnusedService(String),
 }
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::UndefinedService(s) => {
+                write!(f, "Service '{}' referenced in backend but not defined in services", s)
+            }
+            ConfigError::UnusedService(s) => {
+                write!(f, "Service '{}' defined but has no backend", s)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 #[derive(Debug, Deserialize)]
 pub struct Config {

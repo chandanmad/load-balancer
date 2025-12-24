@@ -9,7 +9,6 @@ env_logger = "0.11.8"
 pingora = { version = "0.6.0", features = ["lb", "proxy", "time"] }
 pingora-limits = "0.6.0"
 serde = { version = "1", features = ["derive"] }
-thiserror = "2.0.17"
 
 [dev-dependencies]
 axum = "0.7"
