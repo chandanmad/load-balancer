@@ -72,14 +72,14 @@ impl ShutdownSignalWatch for ChannelShutdown {
 
 fn spawn_load_balancer(
     listen_port: u16,
-    upstreams: Vec<String>,
+    config_path: String,
     metrics: Arc<Metrics>,
 ) -> (oneshot::Sender<()>, thread::JoinHandle<()>) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let handle = thread::spawn(move || {
         let listen_addr = format!("127.0.0.1:{listen_port}");
         let server =
-            RateLimitedLb::start(&listen_addr, upstreams, Arc::new(DummyRatelimit), metrics)
+            RateLimitedLb::start(&listen_addr, config_path, Arc::new(DummyRatelimit), metrics)
                 .expect("start load balancer");
 
         let run_args = RunArgs {
@@ -124,11 +124,31 @@ async fn rate_limit_and_metrics_flow_through_load_balancer() {
 
     let metrics = Arc::new(Metrics::default());
     let lb_port = reserve_port();
-    let (lb_shutdown, lb_handle) = spawn_load_balancer(
-        lb_port,
-        vec![up1_addr.to_string(), up2_addr.to_string()],
-        metrics.clone(),
+
+    // Create a temporary config file
+    let mut config_file = tempfile::NamedTempFile::new().unwrap();
+    let up1_ip = up1_addr.ip().to_string();
+    let up1_port = up1_addr.port();
+
+    // We only use up1 for now as our Basic backend supports single IP
+    let config_content = format!(
+        r#"
+services:
+  root: /
+backends:
+  - service: root
+    backend:
+      type: basic
+      ip: "{}"
+      port: {}
+"#,
+        up1_ip, up1_port
     );
+    use std::io::Write;
+    config_file.write_all(config_content.as_bytes()).unwrap();
+    let config_path = config_file.path().to_str().unwrap().to_string();
+
+    let (lb_shutdown, lb_handle) = spawn_load_balancer(lb_port, config_path, metrics.clone());
 
     wait_for_port(lb_port).await;
 
