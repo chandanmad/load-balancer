@@ -1,6 +1,11 @@
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use pingora::services::background::BackgroundService;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ServerConfig {
@@ -56,6 +61,48 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+pub struct ConfigReloader {
+    pub path: String,
+    pub config: Arc<RwLock<Config>>,
+}
+
+#[async_trait]
+impl BackgroundService for ConfigReloader {
+    async fn start(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+        loop {
+            // Check for shutdown signal
+            if *shutdown.borrow() {
+                return;
+            }
+            // Wait for 5 seconds or shutdown
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    // Continue to reload
+                }
+            }
+
+            match std::fs::read_to_string(&self.path) {
+                Ok(s) => match serde_yaml::from_str::<Config>(&s) {
+                    Ok(new_config) => {
+                        if let Err(e) = new_config.validate() {
+                            log::error!("Invalid backend config during reload: {}", e);
+                        } else {
+                            let mut w = self.config.write().unwrap();
+                            *w = new_config;
+                            log::info!("Backend config reloaded successfully");
+                        }
+                    }
+                    Err(e) => log::error!("Failed to parse backend config during reload: {}", e),
+                },
+                Err(e) => log::error!("Failed to read backend config during reload: {}", e),
+            }
+        }
     }
 }
 

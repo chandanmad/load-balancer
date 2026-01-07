@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::{Router, extract::Query, http::StatusCode, routing::get};
-use load_balancer::lb::{API_KEY_HEADER, RateLimitedLb};
+use load_balancer::lb::API_KEY_HEADER;
 use load_balancer::metric::Metrics;
 use load_balancer::throttle::DummyRatelimit;
 use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
@@ -70,6 +70,9 @@ impl ShutdownSignalWatch for ChannelShutdown {
     }
 }
 
+use load_balancer::configuration::ServerConfig;
+use load_balancer::server::Server;
+
 fn spawn_load_balancer(
     listen_port: u16,
     config_path: String,
@@ -78,9 +81,53 @@ fn spawn_load_balancer(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let handle = thread::spawn(move || {
         let listen_addr = format!("127.0.0.1:{listen_port}");
-        let server =
-            RateLimitedLb::start(&listen_addr, config_path, Arc::new(DummyRatelimit), metrics)
-                .expect("start load balancer");
+
+        let mut server = Server::new(None).expect("create server");
+
+        // We need to construct ServerConfig to pass to bootstrap.
+        // Since we have the config path, we can read it to get the backend path?
+        // Wait, the integration test passes `config_path` which points to a file created in the test.
+        // This file contains:
+        /*
+        services: ...
+        backends: ...
+        */
+        // It does NOT contain `backend: path/to/backend.yaml`.
+        // The `Config` struct in `configuration.rs` matches this format.
+        // But `Server::bootstrap` expects `ServerConfig` which has `backend: String`.
+        // And then it reads `backend` path.
+
+        // This is a disconnect.
+        // In `main.rs`:
+        // `conf.yaml` -> `ServerConfig` { backend: "backend.yaml" }
+        // then `backend.yaml` -> `Config` { services: ..., backends: ... }
+
+        // The integration test config file content (lines 136-144) matches `Config` struct (services, backends).
+        // It does NOT match `ServerConfig`.
+
+        // The previous `RateLimitedLb::start` took `backend_config_path`.
+        // And it loaded `Config` from it.
+
+        // My new `Server::bootstrap` takes `ServerConfig`.
+        // And it uses `server_conf.backend` as the path to read `Config`.
+
+        // So `Server::bootstrap` assumes the argument `server_conf` contains the path to the backend config.
+        // In the integration test, `config_path` IS the path to the backend config (the file containing services/backends).
+
+        // So I can simulate `ServerConfig` by creating one where `backend` is `config_path`.
+        let server_conf = ServerConfig {
+            backend: config_path.clone(),
+        };
+
+        // However, `Server::bootstrap` does:
+        // let backend_config_path = server_conf.backend;
+        // let config_str = std::fs::read_to_string(&backend_config_path)...
+
+        // So this logic holds up. `server_conf.backend` is just a string path.
+
+        server
+            .bootstrap(server_conf, &listen_addr, Arc::new(DummyRatelimit), metrics)
+            .expect("bootstrap server");
 
         let run_args = RunArgs {
             shutdown_signal: Box::new(ChannelShutdown {

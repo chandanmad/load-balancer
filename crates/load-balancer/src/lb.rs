@@ -8,8 +8,6 @@ use crate::throttle::Ratelimit;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
-use pingora::server::Server;
-use pingora::services::background::BackgroundService;
 use pingora_limits::rate::Rate;
 
 pub const API_KEY_HEADER: &str = "x-api-key";
@@ -26,48 +24,6 @@ fn rate_for_window(window_secs: u64) -> Arc<Rate> {
             .entry(window_secs)
             .or_insert_with(|| Arc::new(Rate::new(Duration::from_secs(window_secs)))),
     )
-}
-
-pub struct ConfigReloader {
-    path: String,
-    config: Arc<RwLock<Config>>,
-}
-
-#[async_trait]
-impl BackgroundService for ConfigReloader {
-    async fn start(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
-        loop {
-            // Check for shutdown signal
-            if *shutdown.borrow() {
-                return;
-            }
-            // Wait for 5 seconds or shutdown
-            tokio::select! {
-                _ = shutdown.changed() => {
-                    return;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                    // Continue to reload
-                }
-            }
-
-            match std::fs::read_to_string(&self.path) {
-                Ok(s) => match serde_yaml::from_str::<Config>(&s) {
-                    Ok(new_config) => {
-                        if let Err(e) = new_config.validate() {
-                            log::error!("Invalid backend config during reload: {}", e);
-                        } else {
-                            let mut w = self.config.write().unwrap();
-                            *w = new_config;
-                            log::info!("Backend config reloaded successfully");
-                        }
-                    }
-                    Err(e) => log::error!("Failed to parse backend config during reload: {}", e),
-                },
-                Err(e) => log::error!("Failed to read backend config during reload: {}", e),
-            }
-        }
-    }
 }
 
 pub struct RateLimitedLb {
@@ -87,61 +43,6 @@ impl RateLimitedLb {
             limiter,
             metrics,
         }
-    }
-
-    /// Build and configure a pingora `Server` hosting this load balancer.
-    pub fn start(
-        listen_addr: &str,
-        backend_config_path: String,
-        limiter: Arc<dyn Ratelimit + Send + Sync>,
-        metrics: Arc<Metrics>,
-    ) -> Result<Server> {
-        let mut server = Server::new(None)?;
-        server.bootstrap();
-
-        // Initial load of backend config
-        let config_str = std::fs::read_to_string(&backend_config_path).map_err(|e| {
-            Error::explain(
-                ErrorType::InternalError,
-                format!("failed to read backend config: {e}"),
-            )
-        })?;
-        let config: Config = serde_yaml::from_str(&config_str).map_err(|e| {
-            Error::explain(
-                ErrorType::InternalError,
-                format!("failed to parse backend config: {e}"),
-            )
-        })?;
-        config.validate().map_err(|e| {
-            Error::explain(
-                ErrorType::InternalError,
-                format!("invalid backend config: {e}"),
-            )
-        })?;
-
-        let config_arc = Arc::new(RwLock::new(config));
-
-        // Background service for reloading config
-        // Background service for reloading config
-        let reloader = ConfigReloader {
-            path: backend_config_path,
-            config: config_arc.clone(),
-        };
-        let background = pingora::services::background::GenBackgroundService::new(
-            "config reloader".to_string(),
-            Arc::new(reloader),
-        );
-
-        let mut lb_service = http_proxy_service(
-            &server.configuration,
-            RateLimitedLb::new(config_arc, limiter, metrics),
-        );
-        lb_service.add_tcp(listen_addr);
-
-        server.add_service(background);
-        server.add_service(lb_service);
-
-        Ok(server)
     }
 }
 

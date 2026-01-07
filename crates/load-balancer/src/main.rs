@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use load_balancer::configuration::ServerConfig; // Assuming ServerConfig is public in configuration
-use load_balancer::lb::RateLimitedLb;
+use load_balancer::configuration::ServerConfig;
 use load_balancer::metric::Metrics;
+use load_balancer::server::Server;
 use load_balancer::throttle::DummyRatelimit;
 use pingora::server::configuration::Opt;
-
-// Listeners can be tweaked via config or hardcoded for now, but user said read from pingora conf
-const LISTEN_ADDR: &str = "0.0.0.0:8080";
 
 fn main() {
     // Enable basic logging; set RUST_LOG=info for visibility.
@@ -16,8 +13,9 @@ fn main() {
 
     // Read command line arguments
     let opt = Opt::parse();
-    let mut server = pingora::server::Server::new(Some(opt)).unwrap();
-    server.bootstrap();
+
+    // Create new Server wrapper
+    let mut server = Server::new(Some(opt)).expect("Failed to create server");
 
     // We need to read the configuration file (passing the path if provided in Opt, but Opt might not expose the path directly in a way we can re-read easily if we want "our" fields)
     // Pingora's Server::new loads the config into server.configuration.
@@ -35,40 +33,14 @@ fn main() {
     let server_conf: ServerConfig =
         serde_yaml::from_str(&conf_str).expect("Failed to parse server config");
 
-    let lb = RateLimitedLb::start(
-        LISTEN_ADDR,
-        server_conf.backend,
-        Arc::new(DummyRatelimit),
-        Arc::new(Metrics::default()),
-    )
-    .expect("start load balancer");
+    server
+        .bootstrap(
+            server_conf,
+            "0.0.0.0:8080",
+            Arc::new(DummyRatelimit),
+            Arc::new(Metrics::default()),
+        )
+        .expect("Failed to bootstrap server");
 
-    // Note: RateLimitedLb::start creates a NEW Server instance in my implementation in lb.rs.
-    // This is conflicting with lines 17-18 above.
-    // My previous implementation of RateLimitedLb::start creates a Server.
-    // So I should NOT create a server here, or I should modify RateLimitedLb::start.
-    // In lb.rs: `pub fn start(...) -> Result<Server>`
-    // It does `Server::new(None)`. This ignores command line args for the INNER server.
-    // This is correct if we want `RateLimitedLb` to own the server.
-    // BUT we need to parse CLI args to get the config path.
-
-    // So:
-    // 1. Parse CLI args to find config path.
-    // 2. Parse config file to get backend path.
-    // 3. Call RateLimitedLb::start.
-    //
-    // However, `RateLimitedLb::start` calls `Server::new(None)`.
-    // It should probably call `Server::new(Some(opt))` to respect other pingora settings (threads, pid, etc).
-    // Or I should pass `opt` to `start`.
-
-    // Since I can't easily change `lb.rs` signature right now without another tool call (and I want to save steps),
-    // and `lb.rs` is doing `Server::new(None)`, it might be fine for a basic implementation.
-    // But ideally it should receive the options.
-
-    // Let's stick to reading the config path from CLI manually (using StructOpt/Opt) and passing it.
-
-    // Wait, I can't use `load_balancer::lb` inside `main.rs` if `main.rs` is IN `load-balancer` crate?
-    // Yes, `use crate::lb::...` or `use load_balancer::...` if lib name matches.
-
-    lb.run_forever();
+    server.run_forever();
 }
