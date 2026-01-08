@@ -24,13 +24,18 @@ impl Server {
     pub fn bootstrap(
         &mut self,
         server_conf: ServerConfig,
+        config_base_path: &std::path::Path,
         listen_addr: &str,
         limiter: Arc<dyn Ratelimit + Send + Sync>,
         metrics: Arc<Metrics>,
     ) -> Result<()> {
         self.server.bootstrap();
 
-        let backend_config_path = server_conf.backend;
+        let backend_config_path = if std::path::Path::new(&server_conf.backend).is_absolute() {
+            std::path::PathBuf::from(&server_conf.backend)
+        } else {
+            config_base_path.join(&server_conf.backend)
+        };
 
         // Initial load of backend config
         let config_str = std::fs::read_to_string(&backend_config_path).map_err(|e| {
@@ -56,7 +61,7 @@ impl Server {
 
         // Background service for reloading config
         let reloader = ConfigReloader {
-            path: backend_config_path.clone(),
+            path: backend_config_path.to_string_lossy().into_owned(),
             config: config_arc.clone(),
         };
         let background =

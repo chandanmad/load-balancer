@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use clap::Parser;
 use load_balancer::configuration::ServerConfig;
 use load_balancer::metric::Metrics;
 use load_balancer::server::Server;
@@ -12,7 +11,7 @@ fn main() {
     env_logger::init();
 
     // Read command line arguments
-    let opt = Opt::parse();
+    let opt = Opt::parse_args();
 
     // Create new Server wrapper
     let mut server = Server::new(Some(opt)).expect("Failed to create server");
@@ -26,16 +25,22 @@ fn main() {
 
     // Hack: Get the config path from args again or assume it was passed.
     // Opt struct has `conf: Option<String>`.
-    let conf_path = Opt::parse().conf.unwrap_or_else(|| "conf.yaml".to_string());
+    let conf_path = Opt::parse_args()
+        .conf
+        .unwrap_or_else(|| "conf.yaml".to_string());
 
     // Parse our part of the config
     let conf_str = std::fs::read_to_string(&conf_path).expect("Failed to read config file");
     let server_conf: ServerConfig =
         serde_yaml::from_str(&conf_str).expect("Failed to parse server config");
 
+    let conf_path_buf = std::path::Path::new(&conf_path);
+    let config_base_path = conf_path_buf.parent().unwrap_or(std::path::Path::new("."));
+
     server
         .bootstrap(
             server_conf,
+            config_base_path,
             "0.0.0.0:8080",
             Arc::new(DummyRatelimit),
             Arc::new(Metrics::default()),

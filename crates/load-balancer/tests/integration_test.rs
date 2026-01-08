@@ -126,7 +126,13 @@ fn spawn_load_balancer(
         // So this logic holds up. `server_conf.backend` is just a string path.
 
         server
-            .bootstrap(server_conf, &listen_addr, Arc::new(DummyRatelimit), metrics)
+            .bootstrap(
+                server_conf,
+                std::path::Path::new("."),
+                &listen_addr,
+                Arc::new(DummyRatelimit),
+                metrics,
+            )
             .expect("bootstrap server");
 
         let run_args = RunArgs {
