@@ -1,0 +1,15 @@
+services:
+  geocode_suggest: /geocode/suggest
+  geocode_reverse: /geocode/reverse
+backends:
+  - service: geocode_suggest
+    backend:
+      type: basic
+      ip: localhost
+      port: 8098
+  - service: geocode_reverse
+    backend:
+      type: basic
+      ip: localhost
+      port: 8099
+

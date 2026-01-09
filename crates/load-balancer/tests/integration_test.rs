@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::{Router, extract::Query, http::StatusCode, routing::get};
-use load_balancer::lb::{API_KEY_HEADER, RateLimitedLb};
+use load_balancer::lb::API_KEY_HEADER;
 use load_balancer::metric::Metrics;
 use load_balancer::throttle::DummyRatelimit;
 use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
@@ -70,17 +70,70 @@ impl ShutdownSignalWatch for ChannelShutdown {
     }
 }
 
+use load_balancer::configuration::ServerConfig;
+use load_balancer::server::Server;
+
 fn spawn_load_balancer(
     listen_port: u16,
-    upstreams: Vec<String>,
+    config_path: String,
     metrics: Arc<Metrics>,
 ) -> (oneshot::Sender<()>, thread::JoinHandle<()>) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let handle = thread::spawn(move || {
         let listen_addr = format!("127.0.0.1:{listen_port}");
-        let server =
-            RateLimitedLb::start(&listen_addr, upstreams, Arc::new(DummyRatelimit), metrics)
-                .expect("start load balancer");
+
+        let mut server = Server::new(None).expect("create server");
+
+        // We need to construct ServerConfig to pass to bootstrap.
+        // Since we have the config path, we can read it to get the backend path?
+        // Wait, the integration test passes `config_path` which points to a file created in the test.
+        // This file contains:
+        /*
+        services: ...
+        backends: ...
+        */
+        // It does NOT contain `backend: path/to/backend.yaml`.
+        // The `Config` struct in `configuration.rs` matches this format.
+        // But `Server::bootstrap` expects `ServerConfig` which has `backend: String`.
+        // And then it reads `backend` path.
+
+        // This is a disconnect.
+        // In `main.rs`:
+        // `conf.yaml` -> `ServerConfig` { backend: "backend.yaml" }
+        // then `backend.yaml` -> `Config` { services: ..., backends: ... }
+
+        // The integration test config file content (lines 136-144) matches `Config` struct (services, backends).
+        // It does NOT match `ServerConfig`.
+
+        // The previous `RateLimitedLb::start` took `backend_config_path`.
+        // And it loaded `Config` from it.
+
+        // My new `Server::bootstrap` takes `ServerConfig`.
+        // And it uses `server_conf.backend` as the path to read `Config`.
+
+        // So `Server::bootstrap` assumes the argument `server_conf` contains the path to the backend config.
+        // In the integration test, `config_path` IS the path to the backend config (the file containing services/backends).
+
+        // So I can simulate `ServerConfig` by creating one where `backend` is `config_path`.
+        let server_conf = ServerConfig {
+            backend: config_path.clone(),
+        };
+
+        // However, `Server::bootstrap` does:
+        // let backend_config_path = server_conf.backend;
+        // let config_str = std::fs::read_to_string(&backend_config_path)...
+
+        // So this logic holds up. `server_conf.backend` is just a string path.
+
+        server
+            .bootstrap(
+                server_conf,
+                std::path::Path::new("."),
+                &listen_addr,
+                Arc::new(DummyRatelimit),
+                metrics,
+            )
+            .expect("bootstrap server");
 
         let run_args = RunArgs {
             shutdown_signal: Box::new(ChannelShutdown {
@@ -124,11 +177,31 @@ async fn rate_limit_and_metrics_flow_through_load_balancer() {
 
     let metrics = Arc::new(Metrics::default());
     let lb_port = reserve_port();
-    let (lb_shutdown, lb_handle) = spawn_load_balancer(
-        lb_port,
-        vec![up1_addr.to_string(), up2_addr.to_string()],
-        metrics.clone(),
+
+    // Create a temporary config file
+    let mut config_file = tempfile::NamedTempFile::new().unwrap();
+    let up1_ip = up1_addr.ip().to_string();
+    let up1_port = up1_addr.port();
+
+    // We only use up1 for now as our Basic backend supports single IP
+    let config_content = format!(
+        r#"
+services:
+  root: /
+backends:
+  - service: root
+    backend:
+      type: basic
+      ip: "{}"
+      port: {}
+"#,
+        up1_ip, up1_port
     );
+    use std::io::Write;
+    config_file.write_all(config_content.as_bytes()).unwrap();
+    let config_path = config_file.path().to_str().unwrap().to_string();
+
+    let (lb_shutdown, lb_handle) = spawn_load_balancer(lb_port, config_path, metrics.clone());
 
     wait_for_port(lb_port).await;
 
