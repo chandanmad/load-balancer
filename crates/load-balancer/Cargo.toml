@@ -9,8 +9,11 @@ env_logger = "0.11.8"
 log = "0.4.29"
 pingora = { version = "0.6.0", features = ["lb", "proxy", "time"] }
 pingora-limits = "0.6.0"
+rusqlite = { version = "0.36", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9.34"
+sha2 = "0.10"
+hex = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync", "net"] }
 
 [dev-dependencies]

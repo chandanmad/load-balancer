@@ -26,13 +26,13 @@ fn rate_for_window(window_secs: u64) -> Arc<Rate> {
     )
 }
 
-pub struct RateLimitedLb {
+pub struct Lb {
     config: Arc<RwLock<Config>>,
     limiter: Arc<dyn Ratelimit + Send + Sync>,
     metrics: Arc<Metrics>,
 }
 
-impl RateLimitedLb {
+impl Lb {
     pub fn new(
         config: Arc<RwLock<Config>>,
         limiter: Arc<dyn Ratelimit + Send + Sync>,
@@ -47,7 +47,7 @@ impl RateLimitedLb {
 }
 
 #[async_trait]
-impl ProxyHttp for RateLimitedLb {
+impl ProxyHttp for Lb {
     type CTX = Option<String>;
 
     fn new_ctx(&self) -> Self::CTX {

@@ -117,6 +117,7 @@ fn spawn_load_balancer(
         // So I can simulate `ServerConfig` by creating one where `backend` is `config_path`.
         let server_conf = ServerConfig {
             backend: config_path.clone(),
+            accounts_db: None,
         };
 
         // However, `Server::bootstrap` does:
@@ -173,7 +174,7 @@ fn flatten_status_counts(
 #[tokio::test(flavor = "multi_thread")]
 async fn rate_limit_and_metrics_flow_through_load_balancer() {
     let (up1_addr, up1_shutdown, up1_handle) = spawn_upstream_server().await;
-    let (up2_addr, up2_shutdown, up2_handle) = spawn_upstream_server().await;
+    let (_up2_addr, up2_shutdown, up2_handle) = spawn_upstream_server().await;
 
     let metrics = Arc::new(Metrics::default());
     let lb_port = reserve_port();
