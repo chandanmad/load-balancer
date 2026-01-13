@@ -37,9 +37,9 @@ pub trait Ratelimit {
 pub struct Plan {
     pub plan_id: i64,
     pub name: String,
-    pub monthly_quota: Option<i32>,
-    pub rps_limit: Option<i32>,
-    pub price_per_1k_req: Option<f64>,
+    pub monthly_quota: i32,
+    pub rps_limit: i32,
+    pub price_per_1k_req: f64,
 }
 
 /// Represents an account that owns subscriptions.
@@ -47,18 +47,18 @@ pub struct Plan {
 pub struct Account {
     pub account_id: i64,
     pub email: String,
-    pub plan_id: Option<i64>,
-    pub billing_status: Option<String>,
+    pub plan_id: i64,
+    pub billing_status: String,
 }
 
 /// Represents an API key belonging to an account.
 #[derive(Debug, Clone)]
 pub struct ApiKey {
     pub key_id: i64,
-    pub account_id: Option<i64>,
-    pub api_key_hash: Option<String>,
+    pub account_id: i64,
+    pub api_key_hash: String,
     pub is_active: bool,
-    pub created_at: Option<String>,
+    pub created_at: String,
 }
 
 // ============================================================================
@@ -121,9 +121,8 @@ impl AccountStore {
         if account.account_id > self.max_account_id {
             self.max_account_id = account.account_id;
         }
-        if let Some(plan_id) = account.plan_id {
-            self.account_to_plan.insert(account.account_id, plan_id);
-        }
+        self.account_to_plan
+            .insert(account.account_id, account.plan_id);
     }
 
     /// Insert or update an API key.
@@ -132,9 +131,8 @@ impl AccountStore {
             self.max_key_id = api_key.key_id;
         }
         if api_key.is_active {
-            if let (Some(hash), Some(account_id)) = (api_key.api_key_hash, api_key.account_id) {
-                self.api_key_to_account.insert(hash, account_id);
-            }
+            self.api_key_to_account
+                .insert(api_key.api_key_hash, api_key.account_id);
         }
     }
 }
@@ -393,20 +391,14 @@ impl Ratelimit for AccountRatelimit {
         let store = self.store.read().unwrap();
 
         match store.get_plan_for_key(&api_key_hash) {
-            Some(plan) => {
-                let rps = plan.rps_limit.unwrap_or(DEFAULT_RPS_LIMIT as i32) as isize;
-                Limit {
-                    quota: rps,
-                    per_seconds: DEFAULT_WINDOW_SECS,
-                }
-            }
-            None => {
-                // Unknown key - use restrictive defaults
-                Limit {
-                    quota: DEFAULT_RPS_LIMIT,
-                    per_seconds: DEFAULT_WINDOW_SECS,
-                }
-            }
+            Some(plan) => Limit {
+                quota: plan.rps_limit as isize,
+                per_seconds: DEFAULT_WINDOW_SECS,
+            },
+            None => Limit {
+                quota: DEFAULT_RPS_LIMIT,
+                per_seconds: DEFAULT_WINDOW_SECS,
+            },
         }
     }
 }
@@ -429,23 +421,23 @@ mod tests {
             CREATE TABLE Plans (
                 plan_id BIGINT PRIMARY KEY NOT NULL,
                 name TEXT NOT NULL,
-                monthly_quota INTEGER,
-                rps_limit INTEGER,
-                price_per_1k_req REAL
+                monthly_quota INTEGER NOT NULL,
+                rps_limit INTEGER NOT NULL,
+                price_per_1k_req REAL NOT NULL
             );
             CREATE TABLE Accounts (
                 account_id BIGINT PRIMARY KEY NOT NULL,
                 email TEXT UNIQUE NOT NULL,
-                plan_id INTEGER,
-                billing_status TEXT,
+                plan_id BIGINT NOT NULL,
+                billing_status TEXT NOT NULL,
                 FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
             );
             CREATE TABLE APIKeys (
                 key_id BIGINT PRIMARY KEY NOT NULL,
-                account_id INTEGER,
-                api_key_hash TEXT UNIQUE,
-                is_active BOOLEAN DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                account_id BIGINT NOT NULL,
+                api_key_hash TEXT UNIQUE NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
             );
 
@@ -479,29 +471,29 @@ mod tests {
         store.upsert_plan(Plan {
             plan_id: 1,
             name: "Free".to_string(),
-            monthly_quota: Some(1000),
-            rps_limit: Some(5),
-            price_per_1k_req: Some(0.0),
+            monthly_quota: 1000,
+            rps_limit: 5,
+            price_per_1k_req: 0.0,
         });
 
         store.upsert_account(Account {
             account_id: 1,
             email: "test@example.com".to_string(),
-            plan_id: Some(1),
-            billing_status: Some("active".to_string()),
+            plan_id: 1,
+            billing_status: "active".to_string(),
         });
 
         store.upsert_api_key(ApiKey {
             key_id: 1,
-            account_id: Some(1),
-            api_key_hash: Some("test_hash".to_string()),
+            account_id: 1,
+            api_key_hash: "test_hash".to_string(),
             is_active: true,
-            created_at: None,
+            created_at: "2024-01-01".to_string(),
         });
 
         let plan = store.get_plan_for_key("test_hash").unwrap();
         assert_eq!(plan.name, "Free");
-        assert_eq!(plan.rps_limit, Some(5));
+        assert_eq!(plan.rps_limit, 5);
     }
 
     #[test]
@@ -511,24 +503,24 @@ mod tests {
         store.upsert_plan(Plan {
             plan_id: 1,
             name: "Free".to_string(),
-            monthly_quota: Some(1000),
-            rps_limit: Some(5),
-            price_per_1k_req: Some(0.0),
+            monthly_quota: 1000,
+            rps_limit: 5,
+            price_per_1k_req: 0.0,
         });
 
         store.upsert_account(Account {
             account_id: 1,
             email: "test@example.com".to_string(),
-            plan_id: Some(1),
-            billing_status: Some("active".to_string()),
+            plan_id: 1,
+            billing_status: "active".to_string(),
         });
 
         store.upsert_api_key(ApiKey {
             key_id: 1,
-            account_id: Some(1),
-            api_key_hash: Some("inactive_hash".to_string()),
+            account_id: 1,
+            api_key_hash: "inactive_hash".to_string(),
             is_active: false,
-            created_at: None,
+            created_at: "2024-01-01".to_string(),
         });
 
         assert!(store.get_plan_for_key("inactive_hash").is_none());
@@ -547,11 +539,11 @@ mod tests {
 
         let free_plan = store.get_plan_for_key("hash_free_key").unwrap();
         assert_eq!(free_plan.name, "Free");
-        assert_eq!(free_plan.rps_limit, Some(5));
+        assert_eq!(free_plan.rps_limit, 5);
 
         let pro_plan = store.get_plan_for_key("hash_pro_key").unwrap();
         assert_eq!(pro_plan.name, "Pro");
-        assert_eq!(pro_plan.rps_limit, Some(100));
+        assert_eq!(pro_plan.rps_limit, 100);
     }
 
     #[test]
@@ -588,7 +580,7 @@ mod tests {
 
         let enterprise_plan = store.get_plan_for_key("hash_enterprise_key").unwrap();
         assert_eq!(enterprise_plan.name, "Enterprise");
-        assert_eq!(enterprise_plan.rps_limit, Some(1000));
+        assert_eq!(enterprise_plan.rps_limit, 1000);
     }
 
     #[test]
@@ -599,11 +591,9 @@ mod tests {
         let limiter = AccountRatelimit::new(store);
 
         // The hash_pro_key has rps_limit of 100
-        // We need to manually insert with the actual hash since the DB has raw hashes
-        // For this test, let's check the store directly
         let store = limiter.store.read().unwrap();
         let plan = store.get_plan_for_key("hash_pro_key").unwrap();
-        assert_eq!(plan.rps_limit, Some(100));
+        assert_eq!(plan.rps_limit, 100);
     }
 
     #[test]

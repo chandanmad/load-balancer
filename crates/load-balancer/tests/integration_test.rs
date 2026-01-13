@@ -86,23 +86,23 @@ fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
         CREATE TABLE Plans (
             plan_id BIGINT PRIMARY KEY NOT NULL,
             name TEXT NOT NULL,
-            monthly_quota INTEGER,
-            rps_limit INTEGER,
-            price_per_1k_req REAL
+            monthly_quota INTEGER NOT NULL,
+            rps_limit INTEGER NOT NULL,
+            price_per_1k_req REAL NOT NULL
         );
         CREATE TABLE Accounts (
             account_id BIGINT PRIMARY KEY NOT NULL,
             email TEXT UNIQUE NOT NULL,
-            plan_id INTEGER,
-            billing_status TEXT,
+            plan_id BIGINT NOT NULL,
+            billing_status TEXT NOT NULL,
             FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
         );
         CREATE TABLE APIKeys (
             key_id BIGINT PRIMARY KEY NOT NULL,
-            account_id INTEGER,
-            api_key_hash TEXT UNIQUE,
-            is_active BOOLEAN DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            account_id BIGINT NOT NULL,
+            api_key_hash TEXT UNIQUE NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
         );
 
