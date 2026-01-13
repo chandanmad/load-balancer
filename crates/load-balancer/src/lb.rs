@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
+use crate::accounts::Ratelimit;
 use crate::configuration::{Backend, Config};
 use crate::metric::Metrics;
-use crate::throttle::Ratelimit;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;

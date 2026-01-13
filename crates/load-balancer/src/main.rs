@@ -3,7 +3,6 @@ use std::sync::Arc;
 use load_balancer::configuration::ServerConfig;
 use load_balancer::metric::Metrics;
 use load_balancer::server::Server;
-use load_balancer::throttle::DummyRatelimit;
 use pingora::server::configuration::Opt;
 
 fn main() {
@@ -42,7 +41,6 @@ fn main() {
             server_conf,
             config_base_path,
             "0.0.0.0:8080",
-            Arc::new(DummyRatelimit),
             Arc::new(Metrics::default()),
         )
         .expect("Failed to bootstrap server");

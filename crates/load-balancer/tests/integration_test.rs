@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::{Router, extract::Query, http::StatusCode, routing::get};
+use load_balancer::accounts::hash_api_key;
 use load_balancer::lb::API_KEY_HEADER;
 use load_balancer::metric::Metrics;
-use load_balancer::throttle::DummyRatelimit;
 use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use reqwest::Client;
 use serde::Deserialize;
@@ -72,10 +72,60 @@ impl ShutdownSignalWatch for ChannelShutdown {
 
 use load_balancer::configuration::ServerConfig;
 use load_balancer::server::Server;
+use rusqlite::Connection;
+
+/// Create a test accounts database with a plan that allows 5 requests per second.
+fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let conn = Connection::open(file.path()).unwrap();
+
+    let api_key_hash = hash_api_key(api_key);
+
+    conn.execute_batch(&format!(
+        r#"
+        CREATE TABLE Plans (
+            plan_id BIGINT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            monthly_quota INTEGER,
+            rps_limit INTEGER,
+            price_per_1k_req REAL
+        );
+        CREATE TABLE Accounts (
+            account_id BIGINT PRIMARY KEY NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            plan_id INTEGER,
+            billing_status TEXT,
+            FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
+        );
+        CREATE TABLE APIKeys (
+            key_id BIGINT PRIMARY KEY NOT NULL,
+            account_id INTEGER,
+            api_key_hash TEXT UNIQUE,
+            is_active BOOLEAN DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
+        );
+
+        INSERT INTO Plans (plan_id, name, monthly_quota, rps_limit, price_per_1k_req)
+        VALUES (1, 'Test', 1000, 5, 0.0);
+
+        INSERT INTO Accounts (account_id, email, plan_id, billing_status)
+        VALUES (1, 'test@example.com', 1, 'active');
+
+        INSERT INTO APIKeys (key_id, account_id, api_key_hash, is_active)
+        VALUES (1, 1, '{}', 1);
+        "#,
+        api_key_hash
+    ))
+    .unwrap();
+
+    file
+}
 
 fn spawn_load_balancer(
     listen_port: u16,
     config_path: String,
+    accounts_db_path: String,
     metrics: Arc<Metrics>,
 ) -> (oneshot::Sender<()>, thread::JoinHandle<()>) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -84,54 +134,16 @@ fn spawn_load_balancer(
 
         let mut server = Server::new(None).expect("create server");
 
-        // We need to construct ServerConfig to pass to bootstrap.
-        // Since we have the config path, we can read it to get the backend path?
-        // Wait, the integration test passes `config_path` which points to a file created in the test.
-        // This file contains:
-        /*
-        services: ...
-        backends: ...
-        */
-        // It does NOT contain `backend: path/to/backend.yaml`.
-        // The `Config` struct in `configuration.rs` matches this format.
-        // But `Server::bootstrap` expects `ServerConfig` which has `backend: String`.
-        // And then it reads `backend` path.
-
-        // This is a disconnect.
-        // In `main.rs`:
-        // `conf.yaml` -> `ServerConfig` { backend: "backend.yaml" }
-        // then `backend.yaml` -> `Config` { services: ..., backends: ... }
-
-        // The integration test config file content (lines 136-144) matches `Config` struct (services, backends).
-        // It does NOT match `ServerConfig`.
-
-        // The previous `RateLimitedLb::start` took `backend_config_path`.
-        // And it loaded `Config` from it.
-
-        // My new `Server::bootstrap` takes `ServerConfig`.
-        // And it uses `server_conf.backend` as the path to read `Config`.
-
-        // So `Server::bootstrap` assumes the argument `server_conf` contains the path to the backend config.
-        // In the integration test, `config_path` IS the path to the backend config (the file containing services/backends).
-
-        // So I can simulate `ServerConfig` by creating one where `backend` is `config_path`.
         let server_conf = ServerConfig {
             backend: config_path.clone(),
-            accounts_db: None,
+            accounts_db: accounts_db_path,
         };
-
-        // However, `Server::bootstrap` does:
-        // let backend_config_path = server_conf.backend;
-        // let config_str = std::fs::read_to_string(&backend_config_path)...
-
-        // So this logic holds up. `server_conf.backend` is just a string path.
 
         server
             .bootstrap(
                 server_conf,
                 std::path::Path::new("."),
                 &listen_addr,
-                Arc::new(DummyRatelimit),
                 metrics,
             )
             .expect("bootstrap server");
@@ -179,6 +191,13 @@ async fn rate_limit_and_metrics_flow_through_load_balancer() {
     let metrics = Arc::new(Metrics::default());
     let lb_port = reserve_port();
 
+    // The API key used for testing
+    let api_key = "demo-key";
+
+    // Create test accounts database with this API key having 5 RPS limit
+    let accounts_db = create_test_accounts_db(api_key);
+    let accounts_db_path = accounts_db.path().to_str().unwrap().to_string();
+
     // Create a temporary config file
     let mut config_file = tempfile::NamedTempFile::new().unwrap();
     let up1_ip = up1_addr.ip().to_string();
@@ -202,13 +221,13 @@ backends:
     config_file.write_all(config_content.as_bytes()).unwrap();
     let config_path = config_file.path().to_str().unwrap().to_string();
 
-    let (lb_shutdown, lb_handle) = spawn_load_balancer(lb_port, config_path, metrics.clone());
+    let (lb_shutdown, lb_handle) =
+        spawn_load_balancer(lb_port, config_path, accounts_db_path, metrics.clone());
 
     wait_for_port(lb_port).await;
 
     let client = Client::new();
     let url = format!("http://127.0.0.1:{lb_port}/?status=200&latency_ms=5");
-    let api_key = "demo-key";
 
     for _ in 0..5 {
         let resp = client

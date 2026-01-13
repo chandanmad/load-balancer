@@ -10,7 +10,6 @@ use crate::accounts::AccountRatelimit;
 use crate::configuration::{Config, ConfigReloader, ServerConfig};
 use crate::lb::Lb;
 use crate::metric::Metrics;
-use crate::throttle::Ratelimit;
 
 pub struct Server {
     server: PingoraServer,
@@ -27,7 +26,6 @@ impl Server {
         server_conf: ServerConfig,
         config_base_path: &std::path::Path,
         listen_addr: &str,
-        fallback_limiter: Arc<dyn Ratelimit + Send + Sync>,
         metrics: Arc<Metrics>,
     ) -> Result<()> {
         self.server.bootstrap();
@@ -69,40 +67,34 @@ impl Server {
             GenBackgroundService::new("config reloader".to_string(), Arc::new(reloader));
         self.server.add_service(background);
 
-        // Setup rate limiter - use accounts DB if provided, otherwise use fallback
-        let limiter: Arc<dyn Ratelimit + Send + Sync> =
-            if let Some(ref db_path) = server_conf.accounts_db {
-                let accounts_db_path = if std::path::Path::new(db_path).is_absolute() {
-                    std::path::PathBuf::from(db_path)
-                } else {
-                    config_base_path.join(db_path)
-                };
+        // Setup rate limiter from accounts DB (required)
+        let accounts_db_path = if std::path::Path::new(&server_conf.accounts_db).is_absolute() {
+            std::path::PathBuf::from(&server_conf.accounts_db)
+        } else {
+            config_base_path.join(&server_conf.accounts_db)
+        };
 
-                match AccountRatelimit::from_db(&accounts_db_path) {
-                    Ok((account_limiter, account_service)) => {
-                        log::info!(
-                            "Using account-based rate limiting from {:?}",
-                            accounts_db_path
-                        );
-                        let account_bg = GenBackgroundService::new(
-                            "account data reloader".to_string(),
-                            Arc::new(account_service),
-                        );
-                        self.server.add_service(account_bg);
-                        Arc::new(account_limiter)
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to load accounts DB, using fallback limiter: {}", e);
-                        fallback_limiter
-                    }
-                }
-            } else {
-                fallback_limiter
-            };
+        let (account_limiter, account_service) = AccountRatelimit::from_db(&accounts_db_path)
+            .map_err(|e| {
+                Error::explain(
+                    ErrorType::InternalError,
+                    format!("failed to load accounts DB: {e}"),
+                )
+            })?;
+
+        log::info!(
+            "Using account-based rate limiting from {:?}",
+            accounts_db_path
+        );
+        let account_bg = GenBackgroundService::new(
+            "account data reloader".to_string(),
+            Arc::new(account_service),
+        );
+        self.server.add_service(account_bg);
 
         let mut lb_service = http_proxy_service(
             &self.server.configuration,
-            Lb::new(config_arc, limiter, metrics),
+            Lb::new(config_arc, Arc::new(account_limiter), metrics),
         );
 
         lb_service.add_tcp(listen_addr);

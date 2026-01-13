@@ -13,7 +13,20 @@ use pingora::services::background::BackgroundService;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
-use crate::throttle::{Limit, Ratelimit};
+// ============================================================================
+// Rate Limit Trait and Structs
+// ============================================================================
+
+/// Basic rate limit description.
+pub struct Limit {
+    pub quota: isize,
+    pub per_seconds: u64,
+}
+
+/// Provide rate limit settings for a given API key.
+pub trait Ratelimit {
+    fn limit_for_key(&self, api_key: &str) -> Limit;
+}
 
 // ============================================================================
 // Data Structs

@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ServerConfig {
     pub backend: String,
-    /// Optional path to the accounts SQLite database for rate limiting.
-    #[serde(default)]
-    pub accounts_db: Option<String>,
+    /// Path to the accounts SQLite database for rate limiting.
+    pub accounts_db: String,
 }
 
 #[derive(Debug)]
