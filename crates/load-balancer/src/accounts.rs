@@ -70,6 +70,8 @@ pub struct ApiKey {
 pub struct AccountStore {
     /// API key hash -> Account ID
     api_key_to_account: HashMap<String, i64>,
+    /// API key hash -> Key ID (for usage tracking)
+    api_key_to_key_id: HashMap<String, i64>,
     /// Account ID -> Plan ID
     account_to_plan: HashMap<i64, i64>,
     /// Plan ID -> Plan
@@ -91,6 +93,15 @@ impl AccountStore {
         let account_id = self.api_key_to_account.get(api_key_hash)?;
         let plan_id = self.account_to_plan.get(account_id)?;
         self.plans.get(plan_id)
+    }
+
+    /// Get full context for a key: (account_id, key_id, plan_id).
+    /// Used for usage tracking.
+    pub fn get_key_context(&self, api_key_hash: &str) -> Option<(i64, i64, i64)> {
+        let account_id = *self.api_key_to_account.get(api_key_hash)?;
+        let key_id = *self.api_key_to_key_id.get(api_key_hash)?;
+        let plan_id = *self.account_to_plan.get(&account_id)?;
+        Some((account_id, key_id, plan_id))
     }
 
     /// Get max plan_id for delta loading.
@@ -132,7 +143,9 @@ impl AccountStore {
         }
         if api_key.is_active {
             self.api_key_to_account
-                .insert(api_key.api_key_hash, api_key.account_id);
+                .insert(api_key.api_key_hash.clone(), api_key.account_id);
+            self.api_key_to_key_id
+                .insert(api_key.api_key_hash, api_key.key_id);
         }
     }
 }
@@ -382,6 +395,13 @@ impl AccountRatelimit {
         let store = Arc::new(RwLock::new(loader.load_initial()?));
         let service = AccountDataService::new(AccountLoader::new(&db_path), store.clone());
         Ok((Self::new(store), service))
+    }
+
+    /// Get the full context for a given API key hash: (account_id, key_id, plan_id).
+    /// Used for usage tracking.
+    pub fn get_key_context(&self, api_key_hash: &str) -> Option<(i64, i64, i64)> {
+        let store = self.store.read().unwrap();
+        store.get_key_context(api_key_hash)
     }
 }
 

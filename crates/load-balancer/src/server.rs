@@ -10,6 +10,7 @@ use crate::accounts::AccountRatelimit;
 use crate::configuration::{Config, ConfigReloader, ServerConfig};
 use crate::lb::Lb;
 use crate::metric::Metrics;
+use crate::usage::{UsageTracker, UsageWriter};
 
 pub struct Server {
     server: PingoraServer,
@@ -92,9 +93,41 @@ impl Server {
         );
         self.server.add_service(account_bg);
 
+        // Setup usage tracking if configured
+        let usage_tracker = if let Some(usage_dir) = &server_conf.usage_dir {
+            let usage_path = if std::path::Path::new(usage_dir).is_absolute() {
+                std::path::PathBuf::from(usage_dir)
+            } else {
+                config_base_path.join(usage_dir)
+            };
+
+            // Create directory if it doesn't exist
+            std::fs::create_dir_all(&usage_path).map_err(|e| {
+                Error::explain(
+                    ErrorType::InternalError,
+                    format!("failed to create usage directory: {e}"),
+                )
+            })?;
+
+            let tracker = Arc::new(UsageTracker::new());
+            let writer = UsageWriter::new(tracker.clone(), &usage_path);
+            let usage_bg = GenBackgroundService::new("usage writer".to_string(), Arc::new(writer));
+            self.server.add_service(usage_bg);
+
+            log::info!("Usage tracking enabled, writing to {:?}", usage_path);
+            Some(tracker)
+        } else {
+            None
+        };
+
         let mut lb_service = http_proxy_service(
             &self.server.configuration,
-            Lb::new(config_arc, Arc::new(account_limiter), metrics),
+            Lb::new(
+                config_arc,
+                Arc::new(account_limiter),
+                metrics,
+                usage_tracker,
+            ),
         );
 
         lb_service.add_tcp(listen_addr);
