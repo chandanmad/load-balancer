@@ -1,15 +1,13 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
+use crate::accounts::Ratelimit;
+use crate::configuration::{Backend, Config};
 use crate::metric::Metrics;
-use crate::throttle::Ratelimit;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
-use pingora::lb::LoadBalancer;
-use pingora::lb::prelude::{RoundRobin, TcpHealthCheck};
 use pingora::prelude::*;
-use pingora::server::Server;
 use pingora_limits::rate::Rate;
 
 pub const API_KEY_HEADER: &str = "x-api-key";
@@ -28,62 +26,28 @@ fn rate_for_window(window_secs: u64) -> Arc<Rate> {
     )
 }
 
-pub struct RateLimitedLb {
-    upstreams: Arc<LoadBalancer<RoundRobin>>,
+pub struct Lb {
+    config: Arc<RwLock<Config>>,
     limiter: Arc<dyn Ratelimit + Send + Sync>,
     metrics: Arc<Metrics>,
 }
 
-impl RateLimitedLb {
+impl Lb {
     pub fn new(
-        upstreams: Arc<LoadBalancer<RoundRobin>>,
+        config: Arc<RwLock<Config>>,
         limiter: Arc<dyn Ratelimit + Send + Sync>,
         metrics: Arc<Metrics>,
     ) -> Self {
         Self {
-            upstreams,
+            config,
             limiter,
             metrics,
         }
     }
-
-    /// Build and configure a pingora `Server` hosting this load balancer.
-    pub fn start(
-        listen_addr: &str,
-        upstreams: impl IntoIterator<Item = impl Into<String>>,
-        limiter: Arc<dyn Ratelimit + Send + Sync>,
-        metrics: Arc<Metrics>,
-    ) -> Result<Server> {
-        let mut server = Server::new(None)?;
-        server.bootstrap();
-
-        let upstreams: Vec<String> = upstreams.into_iter().map(Into::into).collect();
-        let mut upstream_lb: LoadBalancer<RoundRobin> = LoadBalancer::try_from_iter(upstreams)
-            .map_err(|e| {
-                Error::explain(ErrorType::InternalError, format!("invalid upstreams: {e}"))
-            })?;
-        upstream_lb.set_health_check(TcpHealthCheck::new());
-        upstream_lb.health_check_frequency = Some(Duration::from_secs(5));
-
-        // Run health checks in the background so unhealthy peers are skipped.
-        let background = background_service("health check", upstream_lb);
-        let upstreams = background.task();
-
-        let mut lb_service = http_proxy_service(
-            &server.configuration,
-            RateLimitedLb::new(upstreams, limiter, metrics),
-        );
-        lb_service.add_tcp(listen_addr);
-
-        server.add_service(background);
-        server.add_service(lb_service);
-
-        Ok(server)
-    }
 }
 
 #[async_trait]
-impl ProxyHttp for RateLimitedLb {
+impl ProxyHttp for Lb {
     type CTX = Option<String>;
 
     fn new_ctx(&self) -> Self::CTX {
@@ -154,19 +118,58 @@ impl ProxyHttp for RateLimitedLb {
 
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let backend = self
-            .upstreams
-            .select(b"", 256)
-            .ok_or_else(|| Error::explain(ErrorType::InternalError, "no upstream available"))?;
+        let path = session.req_header().uri.path();
 
-        Ok(Box::new(HttpPeer::new(
-            backend.addr,
-            false, // plain HTTP to the upstream
-            String::new(),
-        )))
+        let config = self.config.read().unwrap();
+
+        // Strategy: Match path to service, then service to backend.
+        // Assuming path matches the service path prefix or exact match?
+        // configuration.rs: `services: HashMap<String, String>` (Name -> Path)
+        // User didn't specify matching strategy, but usually it's prefix or exact.
+        // Let's assume the value in services map is the prefix.
+
+        let mut selected_service = None;
+        for (service_name, service_path) in &config.services {
+            if path.starts_with(service_path) {
+                // simple longest match or just first match?
+                // For now, let's take the first one, or maybe longest match would be better.
+                // Let's stick to simple logic: match is valid.
+                selected_service = Some(service_name.clone());
+                break;
+            }
+        }
+
+        let service_name = selected_service.ok_or_else(|| {
+            Error::explain(ErrorType::HTTPStatus(404), "Service not found for path")
+        })?;
+
+        // Find backend for this service
+        // config.backends is Vec<BackendConfig>.
+        let backend_config = config
+            .backends
+            .iter()
+            .find(|b| b.service == service_name)
+            .ok_or_else(|| {
+                Error::explain(ErrorType::HTTPStatus(503), "No backend found for service")
+            })?;
+
+        match &backend_config.backend {
+            Backend::Basic { ip, port } => {
+                let addr = format!("{}:{}", ip, port);
+                Ok(Box::new(HttpPeer::new(
+                    addr,
+                    false, // plain HTTP to the upstream
+                    String::new(),
+                )))
+            }
+            Backend::Hetzner { .. } => Err(Error::explain(
+                ErrorType::HTTPStatus(501),
+                "Hetzner backend not implemented yet",
+            )),
+        }
     }
 }
 

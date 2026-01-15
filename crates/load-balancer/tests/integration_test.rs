@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::{Router, extract::Query, http::StatusCode, routing::get};
-use load_balancer::lb::{API_KEY_HEADER, RateLimitedLb};
+use load_balancer::accounts::hash_api_key;
+use load_balancer::lb::API_KEY_HEADER;
 use load_balancer::metric::Metrics;
-use load_balancer::throttle::DummyRatelimit;
 use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use reqwest::Client;
 use serde::Deserialize;
@@ -70,17 +70,83 @@ impl ShutdownSignalWatch for ChannelShutdown {
     }
 }
 
+use load_balancer::configuration::ServerConfig;
+use load_balancer::server::Server;
+use rusqlite::Connection;
+
+/// Create a test accounts database with a plan that allows 5 requests per second.
+fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let conn = Connection::open(file.path()).unwrap();
+
+    let api_key_hash = hash_api_key(api_key);
+
+    conn.execute_batch(&format!(
+        r#"
+        CREATE TABLE Plans (
+            plan_id BIGINT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            monthly_quota INTEGER NOT NULL,
+            rps_limit INTEGER NOT NULL,
+            price_per_1k_req REAL NOT NULL
+        );
+        CREATE TABLE Accounts (
+            account_id BIGINT PRIMARY KEY NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            plan_id BIGINT NOT NULL,
+            billing_status TEXT NOT NULL,
+            FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
+        );
+        CREATE TABLE APIKeys (
+            key_id BIGINT PRIMARY KEY NOT NULL,
+            account_id BIGINT NOT NULL,
+            api_key_hash TEXT UNIQUE NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
+        );
+
+        INSERT INTO Plans (plan_id, name, monthly_quota, rps_limit, price_per_1k_req)
+        VALUES (1, 'Test', 1000, 5, 0.0);
+
+        INSERT INTO Accounts (account_id, email, plan_id, billing_status)
+        VALUES (1, 'test@example.com', 1, 'active');
+
+        INSERT INTO APIKeys (key_id, account_id, api_key_hash, is_active)
+        VALUES (1, 1, '{}', 1);
+        "#,
+        api_key_hash
+    ))
+    .unwrap();
+
+    file
+}
+
 fn spawn_load_balancer(
     listen_port: u16,
-    upstreams: Vec<String>,
+    config_path: String,
+    accounts_db_path: String,
     metrics: Arc<Metrics>,
 ) -> (oneshot::Sender<()>, thread::JoinHandle<()>) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let handle = thread::spawn(move || {
         let listen_addr = format!("127.0.0.1:{listen_port}");
-        let server =
-            RateLimitedLb::start(&listen_addr, upstreams, Arc::new(DummyRatelimit), metrics)
-                .expect("start load balancer");
+
+        let mut server = Server::new(None).expect("create server");
+
+        let server_conf = ServerConfig {
+            backend: config_path.clone(),
+            accounts_db: accounts_db_path,
+        };
+
+        server
+            .bootstrap(
+                server_conf,
+                std::path::Path::new("."),
+                &listen_addr,
+                metrics,
+            )
+            .expect("bootstrap server");
 
         let run_args = RunArgs {
             shutdown_signal: Box::new(ChannelShutdown {
@@ -120,21 +186,48 @@ fn flatten_status_counts(
 #[tokio::test(flavor = "multi_thread")]
 async fn rate_limit_and_metrics_flow_through_load_balancer() {
     let (up1_addr, up1_shutdown, up1_handle) = spawn_upstream_server().await;
-    let (up2_addr, up2_shutdown, up2_handle) = spawn_upstream_server().await;
+    let (_up2_addr, up2_shutdown, up2_handle) = spawn_upstream_server().await;
 
     let metrics = Arc::new(Metrics::default());
     let lb_port = reserve_port();
-    let (lb_shutdown, lb_handle) = spawn_load_balancer(
-        lb_port,
-        vec![up1_addr.to_string(), up2_addr.to_string()],
-        metrics.clone(),
+
+    // The API key used for testing
+    let api_key = "demo-key";
+
+    // Create test accounts database with this API key having 5 RPS limit
+    let accounts_db = create_test_accounts_db(api_key);
+    let accounts_db_path = accounts_db.path().to_str().unwrap().to_string();
+
+    // Create a temporary config file
+    let mut config_file = tempfile::NamedTempFile::new().unwrap();
+    let up1_ip = up1_addr.ip().to_string();
+    let up1_port = up1_addr.port();
+
+    // We only use up1 for now as our Basic backend supports single IP
+    let config_content = format!(
+        r#"
+services:
+  root: /
+backends:
+  - service: root
+    backend:
+      type: basic
+      ip: "{}"
+      port: {}
+"#,
+        up1_ip, up1_port
     );
+    use std::io::Write;
+    config_file.write_all(config_content.as_bytes()).unwrap();
+    let config_path = config_file.path().to_str().unwrap().to_string();
+
+    let (lb_shutdown, lb_handle) =
+        spawn_load_balancer(lb_port, config_path, accounts_db_path, metrics.clone());
 
     wait_for_port(lb_port).await;
 
     let client = Client::new();
     let url = format!("http://127.0.0.1:{lb_port}/?status=200&latency_ms=5");
-    let api_key = "demo-key";
 
     for _ in 0..5 {
         let resp = client
