@@ -84,36 +84,81 @@ fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
     conn.execute_batch(&format!(
         r#"
         CREATE TABLE Plans (
-            plan_id BIGINT PRIMARY KEY NOT NULL,
+            plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             monthly_quota INTEGER NOT NULL,
             rps_limit INTEGER NOT NULL,
-            price_per_1k_req REAL NOT NULL
+            price_per_1k_req REAL NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE Accounts (
-            account_id BIGINT PRIMARY KEY NOT NULL,
+            account_id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
-            plan_id BIGINT NOT NULL,
+            plan_id INTEGER NOT NULL,
             billing_status TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
         );
         CREATE TABLE APIKeys (
-            key_id BIGINT PRIMARY KEY NOT NULL,
-            account_id BIGINT NOT NULL,
+            key_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
             api_key_hash TEXT UNIQUE NOT NULL,
             is_active BOOLEAN NOT NULL DEFAULT 1,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
         );
+        CREATE TABLE ChangeLog (
+            change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT NOT NULL,
+            record_id INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
 
-        INSERT INTO Plans (plan_id, name, monthly_quota, rps_limit, price_per_1k_req)
-        VALUES (1, 'Test', 1000, 5, 0.0);
+        -- Plans triggers
+        CREATE TRIGGER trg_plans_insert AFTER INSERT ON Plans BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Plans', NEW.plan_id, 'INSERT');
+        END;
+        CREATE TRIGGER trg_plans_update AFTER UPDATE ON Plans BEGIN
+            UPDATE Plans SET updated_at = CURRENT_TIMESTAMP WHERE plan_id = NEW.plan_id;
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Plans', NEW.plan_id, 'UPDATE');
+        END;
+        CREATE TRIGGER trg_plans_delete AFTER DELETE ON Plans BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Plans', OLD.plan_id, 'DELETE');
+        END;
 
-        INSERT INTO Accounts (account_id, email, plan_id, billing_status)
-        VALUES (1, 'test@example.com', 1, 'active');
+        -- Accounts triggers
+        CREATE TRIGGER trg_accounts_insert AFTER INSERT ON Accounts BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Accounts', NEW.account_id, 'INSERT');
+        END;
+        CREATE TRIGGER trg_accounts_update AFTER UPDATE ON Accounts BEGIN
+            UPDATE Accounts SET updated_at = CURRENT_TIMESTAMP WHERE account_id = NEW.account_id;
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Accounts', NEW.account_id, 'UPDATE');
+        END;
+        CREATE TRIGGER trg_accounts_delete AFTER DELETE ON Accounts BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Accounts', OLD.account_id, 'DELETE');
+        END;
 
-        INSERT INTO APIKeys (key_id, account_id, api_key_hash, is_active)
-        VALUES (1, 1, '{}', 1);
+        -- APIKeys triggers
+        CREATE TRIGGER trg_apikeys_insert AFTER INSERT ON APIKeys BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.key_id, 'INSERT');
+        END;
+        CREATE TRIGGER trg_apikeys_update AFTER UPDATE ON APIKeys BEGIN
+            UPDATE APIKeys SET updated_at = CURRENT_TIMESTAMP WHERE key_id = NEW.key_id;
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.key_id, 'UPDATE');
+        END;
+        CREATE TRIGGER trg_apikeys_delete AFTER DELETE ON APIKeys BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', OLD.key_id, 'DELETE');
+        END;
+
+        INSERT INTO Plans (name, monthly_quota, rps_limit, price_per_1k_req)
+        VALUES ('Test', 1000, 5, 0.0);
+
+        INSERT INTO Accounts (email, plan_id, billing_status)
+        VALUES ('test@example.com', 1, 'active');
+
+        INSERT INTO APIKeys (account_id, api_key_hash, is_active)
+        VALUES (1, '{}', 1);
         "#,
         api_key_hash
     ))

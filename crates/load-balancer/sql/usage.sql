@@ -1,7 +1,7 @@
 CREATE TABLE Usage (
-    account_id BIGINT NOT NULL,
-    key_id BIGINT NOT NULL,
-    plan_id BIGINT NOT NULL,
+    account_id INTEGER NOT NULL,
+    key_id INTEGER NOT NULL,
+    plan_id INTEGER NOT NULL,
     date_time DATETIME NOT NULL,
     total_requests INTEGER,
     total_data_mb REAL,
