@@ -12,6 +12,10 @@ pub struct ServerConfig {
     pub backend: String,
     /// Path to the accounts SQLite database for rate limiting.
     pub accounts_db: String,
+    /// Optional directory for hourly usage SQLite files.
+    /// Files are named `usage-<YYYYMMDDHH>.db`.
+    #[serde(default)]
+    pub usage_dir: Option<String>,
 }
 
 #[derive(Debug)]

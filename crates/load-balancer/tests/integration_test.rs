@@ -84,36 +84,79 @@ fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
     conn.execute_batch(&format!(
         r#"
         CREATE TABLE Plans (
-            plan_id BIGINT PRIMARY KEY NOT NULL,
+            plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             monthly_quota INTEGER NOT NULL,
             rps_limit INTEGER NOT NULL,
-            price_per_1k_req REAL NOT NULL
+            price_per_1k_req REAL NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE Accounts (
-            account_id BIGINT PRIMARY KEY NOT NULL,
+            account_id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
-            plan_id BIGINT NOT NULL,
+            plan_id INTEGER NOT NULL,
             billing_status TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
         );
         CREATE TABLE APIKeys (
-            key_id BIGINT PRIMARY KEY NOT NULL,
-            account_id BIGINT NOT NULL,
+            api_key_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            api_key CHAR(36) UNIQUE NOT NULL,
+            account_id INTEGER NOT NULL,
             api_key_hash TEXT UNIQUE NOT NULL,
             is_active BOOLEAN NOT NULL DEFAULT 1,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (account_id) REFERENCES Accounts(account_id)
         );
+        CREATE TABLE ChangeLog (
+            change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT NOT NULL,
+            record_id INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
 
-        INSERT INTO Plans (plan_id, name, monthly_quota, rps_limit, price_per_1k_req)
-        VALUES (1, 'Test', 1000, 5, 0.0);
+        -- Plans triggers
+        CREATE TRIGGER trg_plans_insert AFTER INSERT ON Plans BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Plans', NEW.plan_id, 'INSERT');
+        END;
+        CREATE TRIGGER trg_plans_update AFTER UPDATE ON Plans BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Plans', NEW.plan_id, 'UPDATE');
+        END;
+        CREATE TRIGGER trg_plans_delete AFTER DELETE ON Plans BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Plans', OLD.plan_id, 'DELETE');
+        END;
 
-        INSERT INTO Accounts (account_id, email, plan_id, billing_status)
-        VALUES (1, 'test@example.com', 1, 'active');
+        -- Accounts triggers
+        CREATE TRIGGER trg_accounts_insert AFTER INSERT ON Accounts BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Accounts', NEW.account_id, 'INSERT');
+        END;
+        CREATE TRIGGER trg_accounts_update AFTER UPDATE ON Accounts BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Accounts', NEW.account_id, 'UPDATE');
+        END;
+        CREATE TRIGGER trg_accounts_delete AFTER DELETE ON Accounts BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Accounts', OLD.account_id, 'DELETE');
+        END;
 
-        INSERT INTO APIKeys (key_id, account_id, api_key_hash, is_active)
-        VALUES (1, 1, '{}', 1);
+        -- APIKeys triggers
+        CREATE TRIGGER trg_apikeys_insert AFTER INSERT ON APIKeys BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.api_key_id, 'INSERT');
+        END;
+        CREATE TRIGGER trg_apikeys_update AFTER UPDATE ON APIKeys BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.api_key_id, 'UPDATE');
+        END;
+        CREATE TRIGGER trg_apikeys_delete AFTER DELETE ON APIKeys BEGIN
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', OLD.api_key_id, 'DELETE');
+        END;
+
+        INSERT INTO Plans (name, monthly_quota, rps_limit, price_per_1k_req)
+        VALUES ('Test', 1000, 5, 0.0);
+
+        INSERT INTO Accounts (email, plan_id, billing_status)
+        VALUES ('test@example.com', 1, 'active');
+
+        INSERT INTO APIKeys (api_key, account_id, api_key_hash, is_active)
+        VALUES ('00000000-0000-0000-0000-000000000001', 1, '{}', 1);
         "#,
         api_key_hash
     ))
@@ -137,6 +180,7 @@ fn spawn_load_balancer(
         let server_conf = ServerConfig {
             backend: config_path.clone(),
             accounts_db: accounts_db_path,
+            usage_dir: None,
         };
 
         server
@@ -261,4 +305,154 @@ backends:
     let _ = up2_shutdown.send(());
     up1_handle.await.unwrap();
     up2_handle.await.unwrap();
+}
+
+fn spawn_load_balancer_with_usage(
+    listen_port: u16,
+    config_path: String,
+    accounts_db_path: String,
+    usage_dir: String,
+    metrics: Arc<Metrics>,
+) -> (oneshot::Sender<()>, thread::JoinHandle<()>) {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handle = thread::spawn(move || {
+        let listen_addr = format!("127.0.0.1:{listen_port}");
+
+        let mut server = Server::new(None).expect("create server");
+
+        let server_conf = ServerConfig {
+            backend: config_path.clone(),
+            accounts_db: accounts_db_path,
+            usage_dir: Some(usage_dir),
+        };
+
+        server
+            .bootstrap(
+                server_conf,
+                std::path::Path::new("."),
+                &listen_addr,
+                metrics,
+            )
+            .expect("bootstrap server");
+
+        let run_args = RunArgs {
+            shutdown_signal: Box::new(ChannelShutdown {
+                rx: Mutex::new(Some(shutdown_rx)),
+            }),
+        };
+
+        server.run(run_args);
+    });
+
+    (shutdown_tx, handle)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn usage_tracking_writes_to_sqlite_on_shutdown() {
+    let (up_addr, up_shutdown, up_handle) = spawn_upstream_server().await;
+
+    let metrics = Arc::new(Metrics::default());
+    let lb_port = reserve_port();
+
+    // The API key used for testing
+    let api_key = "usage-test-key";
+
+    // Create test accounts database
+    let accounts_db = create_test_accounts_db(api_key);
+    let accounts_db_path = accounts_db.path().to_str().unwrap().to_string();
+
+    // Create usage directory
+    let usage_dir = tempfile::TempDir::new().unwrap();
+    let usage_dir_path = usage_dir.path().to_str().unwrap().to_string();
+
+    // Create a temporary config file
+    let mut config_file = tempfile::NamedTempFile::new().unwrap();
+    let up_ip = up_addr.ip().to_string();
+    let up_port = up_addr.port();
+
+    let config_content = format!(
+        r#"
+services:
+  root: /
+backends:
+  - service: root
+    backend:
+      type: basic
+      ip: "{}"
+      port: {}
+"#,
+        up_ip, up_port
+    );
+    use std::io::Write;
+    config_file.write_all(config_content.as_bytes()).unwrap();
+    let config_path = config_file.path().to_str().unwrap().to_string();
+
+    let (lb_shutdown, lb_handle) = spawn_load_balancer_with_usage(
+        lb_port,
+        config_path,
+        accounts_db_path,
+        usage_dir_path.clone(),
+        metrics.clone(),
+    );
+
+    wait_for_port(lb_port).await;
+
+    let client = Client::new();
+    let url = format!("http://127.0.0.1:{lb_port}/?status=200&latency_ms=5");
+
+    // Make 3 successful requests
+    for _ in 0..3 {
+        let resp = client
+            .get(&url)
+            .header(API_KEY_HEADER, api_key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Shutdown load balancer - this should trigger usage flush
+    let _ = lb_shutdown.send(());
+    let _ = lb_handle.join();
+
+    // Give a moment for file writes to complete
+    sleep(Duration::from_millis(100)).await;
+
+    // Find usage DB files
+    let usage_files: Vec<_> = std::fs::read_dir(&usage_dir_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with("usage-") && n.ends_with(".db"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert!(
+        !usage_files.is_empty(),
+        "Expected at least one usage-*.db file in {:?}",
+        usage_dir_path
+    );
+
+    // Query the first usage DB
+    let db_path = usage_files[0].path();
+    let conn = Connection::open(&db_path).unwrap();
+
+    // Verify records exist
+    let total_requests: i64 = conn
+        .query_row("SELECT SUM(total_requests) FROM Usage", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+
+    assert_eq!(
+        total_requests, 3,
+        "Expected 3 total requests in usage DB, got {}",
+        total_requests
+    );
+
+    let _ = up_shutdown.send(());
+    up_handle.await.unwrap();
 }

@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
-use crate::accounts::Ratelimit;
+use crate::accounts::{AccountRatelimit, Ratelimit, hash_api_key};
 use crate::configuration::{Backend, Config};
 use crate::metric::Metrics;
+use crate::usage::UsageTracker;
 use async_trait::async_trait;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora_limits::rate::Rate;
+use uuid::Uuid;
 
 pub const API_KEY_HEADER: &str = "x-api-key";
 pub const MISSING_API_KEY: &str = "<missing>";
@@ -28,30 +30,44 @@ fn rate_for_window(window_secs: u64) -> Arc<Rate> {
 
 pub struct Lb {
     config: Arc<RwLock<Config>>,
-    limiter: Arc<dyn Ratelimit + Send + Sync>,
+    limiter: Arc<AccountRatelimit>,
     metrics: Arc<Metrics>,
+    usage_tracker: Option<Arc<UsageTracker>>,
 }
 
 impl Lb {
     pub fn new(
         config: Arc<RwLock<Config>>,
-        limiter: Arc<dyn Ratelimit + Send + Sync>,
+        limiter: Arc<AccountRatelimit>,
         metrics: Arc<Metrics>,
+        usage_tracker: Option<Arc<UsageTracker>>,
     ) -> Self {
         Self {
             config,
             limiter,
             metrics,
+            usage_tracker,
         }
     }
 }
 
+/// Context for each request, tracking API key and usage information.
+#[derive(Default)]
+pub struct RequestCtx {
+    /// The API key from the request header.
+    pub api_key: Option<String>,
+    /// Usage context: (account_id, api_key_id, plan_id) if resolved.
+    pub usage_ctx: Option<(i64, Uuid, i64)>,
+    /// Accumulated response body size in bytes.
+    pub response_bytes: u64,
+}
+
 #[async_trait]
 impl ProxyHttp for Lb {
-    type CTX = Option<String>;
+    type CTX = RequestCtx;
 
     fn new_ctx(&self) -> Self::CTX {
-        None
+        RequestCtx::default()
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool>
@@ -77,7 +93,13 @@ impl ProxyHttp for Lb {
             }
         };
 
-        *ctx = Some(api_key.clone());
+        ctx.api_key = Some(api_key.clone());
+
+        // Resolve usage context for tracking
+        if self.usage_tracker.is_some() {
+            let api_key_hash = hash_api_key(&api_key);
+            ctx.usage_ctx = self.limiter.get_key_context(&api_key_hash);
+        }
 
         let limit = self.limiter.limit_for_key(&api_key);
         let window_secs = limit.per_seconds.max(1);
@@ -109,11 +131,41 @@ impl ProxyHttp for Lb {
     where
         Self::CTX: Send + Sync,
     {
-        if let Some(api_key) = ctx.as_ref() {
+        if let Some(api_key) = ctx.api_key.as_ref() {
             self.metrics
                 .record(api_key, upstream_response.status.as_u16());
         }
         Ok(())
+    }
+
+    fn upstream_response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        // Accumulate response body size
+        if let Some(bytes) = body {
+            ctx.response_bytes += bytes.len() as u64;
+        }
+        Ok(())
+    }
+
+    async fn logging(&self, _session: &mut Session, _e: Option<&Error>, ctx: &mut Self::CTX)
+    where
+        Self::CTX: Send + Sync,
+    {
+        // Record usage at the end of the request
+        if let (Some(tracker), Some((account_id, api_key_id, plan_id))) =
+            (&self.usage_tracker, &ctx.usage_ctx)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            tracker.record(*account_id, *api_key_id, *plan_id, ctx.response_bytes, now);
+        }
     }
 
     async fn upstream_peer(

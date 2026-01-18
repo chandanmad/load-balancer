@@ -10,10 +10,13 @@ log = "0.4.29"
 pingora = { version = "0.6.0", features = ["lb", "proxy", "time"] }
 pingora-limits = "0.6.0"
 rusqlite = { version = "0.36", features = ["bundled"] }
+bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9.34"
 sha2 = "0.10"
 hex = "0.4"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros", "sync", "net"] }
 
 [dev-dependencies]
