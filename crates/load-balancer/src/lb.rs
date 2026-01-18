@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora_limits::rate::Rate;
+use uuid::Uuid;
 
 pub const API_KEY_HEADER: &str = "x-api-key";
 pub const MISSING_API_KEY: &str = "<missing>";
@@ -55,8 +56,8 @@ impl Lb {
 pub struct RequestCtx {
     /// The API key from the request header.
     pub api_key: Option<String>,
-    /// Usage context: (account_id, key_id, plan_id) if resolved.
-    pub usage_ctx: Option<(i64, i64, i64)>,
+    /// Usage context: (account_id, api_key_id, plan_id) if resolved.
+    pub usage_ctx: Option<(i64, Uuid, i64)>,
     /// Accumulated response body size in bytes.
     pub response_bytes: u64,
 }
@@ -156,14 +157,14 @@ impl ProxyHttp for Lb {
         Self::CTX: Send + Sync,
     {
         // Record usage at the end of the request
-        if let (Some(tracker), Some((account_id, key_id, plan_id))) =
-            (&self.usage_tracker, ctx.usage_ctx)
+        if let (Some(tracker), Some((account_id, api_key_id, plan_id))) =
+            (&self.usage_tracker, &ctx.usage_ctx)
         {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as i64;
-            tracker.record(account_id, key_id, plan_id, ctx.response_bytes, now);
+            tracker.record(*account_id, *api_key_id, *plan_id, ctx.response_bytes, now);
         }
     }
 

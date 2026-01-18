@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use pingora::services::background::BackgroundService;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 // ============================================================================
 // Rate Limit Trait and Structs
@@ -54,7 +55,7 @@ pub struct Account {
 /// Represents an API key belonging to an account.
 #[derive(Debug, Clone)]
 pub struct ApiKey {
-    pub key_id: i64,
+    pub api_key_id: Uuid,
     pub account_id: i64,
     pub api_key_hash: String,
     pub is_active: bool,
@@ -65,7 +66,7 @@ pub struct ApiKey {
 pub struct ChangeLogEntry {
     pub change_id: i64,
     pub table_name: String,
-    pub record_id: i64,
+    pub record_id: String,
     pub operation: String,
 }
 
@@ -78,10 +79,10 @@ pub struct ChangeLogEntry {
 pub struct AccountStore {
     /// API key hash -> Account ID
     api_key_to_account: HashMap<String, i64>,
-    /// API key hash -> Key ID (for usage tracking)
-    api_key_to_key_id: HashMap<String, i64>,
-    /// Key ID -> API key hash (for reverse lookup during deletes)
-    key_id_to_hash: HashMap<i64, String>,
+    /// API key hash -> API Key ID (for usage tracking)
+    api_key_to_key_id: HashMap<String, Uuid>,
+    /// API Key ID -> API key hash (for reverse lookup during deletes)
+    key_id_to_hash: HashMap<Uuid, String>,
     /// Account ID -> Plan ID
     account_to_plan: HashMap<i64, i64>,
     /// Plan ID -> Plan
@@ -103,13 +104,13 @@ impl AccountStore {
         self.plans.get(plan_id)
     }
 
-    /// Get full context for a key: (account_id, key_id, plan_id).
+    /// Get full context for a key: (account_id, api_key_id, plan_id).
     /// Used for usage tracking.
-    pub fn get_key_context(&self, api_key_hash: &str) -> Option<(i64, i64, i64)> {
+    pub fn get_key_context(&self, api_key_hash: &str) -> Option<(i64, Uuid, i64)> {
         let account_id = *self.api_key_to_account.get(api_key_hash)?;
-        let key_id = *self.api_key_to_key_id.get(api_key_hash)?;
+        let api_key_id = *self.api_key_to_key_id.get(api_key_hash)?;
         let plan_id = *self.account_to_plan.get(&account_id)?;
-        Some((account_id, key_id, plan_id))
+        Some((account_id, api_key_id, plan_id))
     }
 
     /// Get max change_id for ChangeLog-based delta loading.
@@ -146,7 +147,7 @@ impl AccountStore {
     /// Insert or update an API key.
     pub fn upsert_api_key(&mut self, api_key: ApiKey) {
         // Remove old hash mapping if key already exists
-        if let Some(old_hash) = self.key_id_to_hash.get(&api_key.key_id) {
+        if let Some(old_hash) = self.key_id_to_hash.get(&api_key.api_key_id) {
             self.api_key_to_account.remove(old_hash);
             self.api_key_to_key_id.remove(old_hash);
         }
@@ -155,18 +156,18 @@ impl AccountStore {
             self.api_key_to_account
                 .insert(api_key.api_key_hash.clone(), api_key.account_id);
             self.api_key_to_key_id
-                .insert(api_key.api_key_hash.clone(), api_key.key_id);
+                .insert(api_key.api_key_hash.clone(), api_key.api_key_id.clone());
             self.key_id_to_hash
-                .insert(api_key.key_id, api_key.api_key_hash);
+                .insert(api_key.api_key_id, api_key.api_key_hash);
         } else {
             // Inactive key: remove from lookup maps but keep reverse lookup
-            self.key_id_to_hash.remove(&api_key.key_id);
+            self.key_id_to_hash.remove(&api_key.api_key_id);
         }
     }
 
     /// Delete an API key by ID.
-    pub fn delete_api_key(&mut self, key_id: i64) {
-        if let Some(hash) = self.key_id_to_hash.remove(&key_id) {
+    pub fn delete_api_key(&mut self, api_key_id: &Uuid) {
+        if let Some(hash) = self.key_id_to_hash.remove(api_key_id) {
             self.api_key_to_account.remove(&hash);
             self.api_key_to_key_id.remove(&hash);
         }
@@ -234,10 +235,18 @@ impl AccountLoader {
 
         // Load all API keys
         let mut stmt =
-            conn.prepare("SELECT key_id, account_id, api_key_hash, is_active FROM APIKeys")?;
+            conn.prepare("SELECT api_key_id, account_id, api_key_hash, is_active FROM APIKeys")?;
         let keys = stmt.query_map([], |row| {
+            let api_key_id_str: String = row.get(0)?;
+            let api_key_id = Uuid::parse_str(&api_key_id_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
             Ok(ApiKey {
-                key_id: row.get(0)?,
+                api_key_id,
                 account_id: row.get(1)?,
                 api_key_hash: row.get(2)?,
                 is_active: row.get(3)?,
@@ -297,40 +306,50 @@ impl AccountLoader {
 
             match (entry.table_name.as_str(), entry.operation.as_str()) {
                 ("Plans", "DELETE") => {
-                    store.delete_plan(entry.record_id);
-                    deletes += 1;
+                    if let Ok(plan_id) = entry.record_id.parse::<i64>() {
+                        store.delete_plan(plan_id);
+                        deletes += 1;
+                    }
                 }
                 ("Plans", _) => {
                     // INSERT or UPDATE: fetch and upsert
-                    if let Some(plan) = self.fetch_plan(&conn, entry.record_id)? {
-                        store.upsert_plan(plan);
-                        if entry.operation == "INSERT" {
-                            inserts += 1;
-                        } else {
-                            updates += 1;
+                    if let Ok(plan_id) = entry.record_id.parse::<i64>() {
+                        if let Some(plan) = self.fetch_plan(&conn, plan_id)? {
+                            store.upsert_plan(plan);
+                            if entry.operation == "INSERT" {
+                                inserts += 1;
+                            } else {
+                                updates += 1;
+                            }
                         }
                     }
                 }
                 ("Accounts", "DELETE") => {
-                    store.delete_account(entry.record_id);
-                    deletes += 1;
+                    if let Ok(account_id) = entry.record_id.parse::<i64>() {
+                        store.delete_account(account_id);
+                        deletes += 1;
+                    }
                 }
                 ("Accounts", _) => {
-                    if let Some(account) = self.fetch_account(&conn, entry.record_id)? {
-                        store.upsert_account(account);
-                        if entry.operation == "INSERT" {
-                            inserts += 1;
-                        } else {
-                            updates += 1;
+                    if let Ok(account_id) = entry.record_id.parse::<i64>() {
+                        if let Some(account) = self.fetch_account(&conn, account_id)? {
+                            store.upsert_account(account);
+                            if entry.operation == "INSERT" {
+                                inserts += 1;
+                            } else {
+                                updates += 1;
+                            }
                         }
                     }
                 }
                 ("APIKeys", "DELETE") => {
-                    store.delete_api_key(entry.record_id);
-                    deletes += 1;
+                    if let Ok(api_key_id) = Uuid::parse_str(&entry.record_id) {
+                        store.delete_api_key(&api_key_id);
+                        deletes += 1;
+                    }
                 }
                 ("APIKeys", _) => {
-                    if let Some(api_key) = self.fetch_api_key(&conn, entry.record_id)? {
+                    if let Some(api_key) = self.fetch_api_key(&conn, &entry.record_id)? {
                         store.upsert_api_key(api_key);
                         if entry.operation == "INSERT" {
                             inserts += 1;
@@ -409,15 +428,23 @@ impl AccountLoader {
     fn fetch_api_key(
         &self,
         conn: &Connection,
-        key_id: i64,
+        api_key_id: &str,
     ) -> Result<Option<ApiKey>, rusqlite::Error> {
         let mut stmt = conn.prepare(
-            "SELECT key_id, account_id, api_key_hash, is_active FROM APIKeys WHERE key_id = ?",
+            "SELECT api_key_id, account_id, api_key_hash, is_active FROM APIKeys WHERE api_key_id = ?",
         )?;
-        let mut rows = stmt.query([key_id])?;
+        let mut rows = stmt.query([api_key_id])?;
         if let Some(row) = rows.next()? {
+            let api_key_id_str: String = row.get(0)?;
+            let api_key_id = Uuid::parse_str(&api_key_id_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?;
             Ok(Some(ApiKey {
-                key_id: row.get(0)?,
+                api_key_id,
                 account_id: row.get(1)?,
                 api_key_hash: row.get(2)?,
                 is_active: row.get(3)?,
@@ -511,9 +538,9 @@ impl AccountRatelimit {
         Ok((Self::new(store), service))
     }
 
-    /// Get the full context for a given API key hash: (account_id, key_id, plan_id).
+    /// Get the full context for a given API key hash: (account_id, api_key_id, plan_id).
     /// Used for usage tracking.
-    pub fn get_key_context(&self, api_key_hash: &str) -> Option<(i64, i64, i64)> {
+    pub fn get_key_context(&self, api_key_hash: &str) -> Option<(i64, Uuid, i64)> {
         let store = self.store.read().unwrap();
         store.get_key_context(api_key_hash)
     }
@@ -569,7 +596,7 @@ mod tests {
                 FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
             );
             CREATE TABLE APIKeys (
-                key_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                api_key_id CHAR(36) PRIMARY KEY,
                 account_id INTEGER NOT NULL,
                 api_key_hash TEXT UNIQUE NOT NULL,
                 is_active BOOLEAN NOT NULL DEFAULT 1,
@@ -579,7 +606,7 @@ mod tests {
             CREATE TABLE ChangeLog (
                 change_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 table_name TEXT NOT NULL,
-                record_id INTEGER NOT NULL,
+                record_id TEXT NOT NULL,
                 operation TEXT NOT NULL,
                 occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -610,14 +637,14 @@ mod tests {
 
             -- APIKeys triggers
             CREATE TRIGGER trg_apikeys_insert AFTER INSERT ON APIKeys BEGIN
-                INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.key_id, 'INSERT');
+                INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.api_key_id, 'INSERT');
             END;
             CREATE TRIGGER trg_apikeys_update AFTER UPDATE ON APIKeys BEGIN
-                UPDATE APIKeys SET updated_at = CURRENT_TIMESTAMP WHERE key_id = NEW.key_id;
-                INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.key_id, 'UPDATE');
+                UPDATE APIKeys SET updated_at = CURRENT_TIMESTAMP WHERE api_key_id = NEW.api_key_id;
+                INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.api_key_id, 'UPDATE');
             END;
             CREATE TRIGGER trg_apikeys_delete AFTER DELETE ON APIKeys BEGIN
-                INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', OLD.key_id, 'DELETE');
+                INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', OLD.api_key_id, 'DELETE');
             END;
 
             INSERT INTO Plans (name, monthly_quota, rps_limit, price_per_1k_req)
@@ -630,12 +657,12 @@ mod tests {
             INSERT INTO Accounts (email, plan_id, billing_status)
             VALUES ('pro@example.com', 2, 'active');
 
-            INSERT INTO APIKeys (account_id, api_key_hash, is_active)
-            VALUES (1, 'hash_free_key', 1);
-            INSERT INTO APIKeys (account_id, api_key_hash, is_active)
-            VALUES (2, 'hash_pro_key', 1);
-            INSERT INTO APIKeys (account_id, api_key_hash, is_active)
-            VALUES (1, 'hash_inactive_key', 0);
+            INSERT INTO APIKeys (api_key_id, account_id, api_key_hash, is_active)
+            VALUES ('00000000-0000-0000-0000-000000000001', 1, 'hash_free_key', 1);
+            INSERT INTO APIKeys (api_key_id, account_id, api_key_hash, is_active)
+            VALUES ('00000000-0000-0000-0000-000000000002', 2, 'hash_pro_key', 1);
+            INSERT INTO APIKeys (api_key_id, account_id, api_key_hash, is_active)
+            VALUES ('00000000-0000-0000-0000-000000000003', 1, 'hash_inactive_key', 0);
             "#,
         )
         .unwrap();
@@ -663,7 +690,7 @@ mod tests {
         });
 
         store.upsert_api_key(ApiKey {
-            key_id: 1,
+            api_key_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             account_id: 1,
             api_key_hash: "test_hash".to_string(),
             is_active: true,
@@ -694,7 +721,7 @@ mod tests {
         });
 
         store.upsert_api_key(ApiKey {
-            key_id: 1,
+            api_key_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             account_id: 1,
             api_key_hash: "inactive_hash".to_string(),
             is_active: false,
@@ -741,8 +768,8 @@ mod tests {
             VALUES ('Enterprise', 1000000, 1000, 0.0001);
             INSERT INTO Accounts (email, plan_id, billing_status)
             VALUES ('enterprise@example.com', 3, 'active');
-            INSERT INTO APIKeys (account_id, api_key_hash, is_active)
-            VALUES (3, 'hash_enterprise_key', 1);
+            INSERT INTO APIKeys (api_key_id, account_id, api_key_hash, is_active)
+            VALUES ('00000000-0000-0000-0000-000000000004', 3, 'hash_enterprise_key', 1);
             "#,
         )
         .unwrap();

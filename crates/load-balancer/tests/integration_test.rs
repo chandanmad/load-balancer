@@ -100,7 +100,7 @@ fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
             FOREIGN KEY (plan_id) REFERENCES Plans(plan_id)
         );
         CREATE TABLE APIKeys (
-            key_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            api_key_id CHAR(36) PRIMARY KEY,
             account_id INTEGER NOT NULL,
             api_key_hash TEXT UNIQUE NOT NULL,
             is_active BOOLEAN NOT NULL DEFAULT 1,
@@ -141,14 +141,14 @@ fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
 
         -- APIKeys triggers
         CREATE TRIGGER trg_apikeys_insert AFTER INSERT ON APIKeys BEGIN
-            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.key_id, 'INSERT');
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.api_key_id, 'INSERT');
         END;
         CREATE TRIGGER trg_apikeys_update AFTER UPDATE ON APIKeys BEGIN
-            UPDATE APIKeys SET updated_at = CURRENT_TIMESTAMP WHERE key_id = NEW.key_id;
-            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.key_id, 'UPDATE');
+            UPDATE APIKeys SET updated_at = CURRENT_TIMESTAMP WHERE api_key_id = NEW.api_key_id;
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.api_key_id, 'UPDATE');
         END;
         CREATE TRIGGER trg_apikeys_delete AFTER DELETE ON APIKeys BEGIN
-            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', OLD.key_id, 'DELETE');
+            INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', OLD.api_key_id, 'DELETE');
         END;
 
         INSERT INTO Plans (name, monthly_quota, rps_limit, price_per_1k_req)
@@ -157,8 +157,8 @@ fn create_test_accounts_db(api_key: &str) -> tempfile::NamedTempFile {
         INSERT INTO Accounts (email, plan_id, billing_status)
         VALUES ('test@example.com', 1, 'active');
 
-        INSERT INTO APIKeys (account_id, api_key_hash, is_active)
-        VALUES (1, '{}', 1);
+        INSERT INTO APIKeys (api_key_id, account_id, api_key_hash, is_active)
+        VALUES ('00000000-0000-0000-0000-000000000001', 1, '{}', 1);
         "#,
         api_key_hash
     ))

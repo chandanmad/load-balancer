@@ -1,7 +1,7 @@
 //! API usage tracking with minute-level granularity and hourly SQLite dumps.
 //!
 //! This module captures per-request metrics (request count, response data size) grouped by
-//! (account_id, key_id, plan_id, minute). Every hour, the data is flushed to a timestamped
+//! (account_id, api_key_id, plan_id, minute). Every hour, the data is flushed to a timestamped
 //! SQLite database file (`usage-<YYYYMMDDHH>.db`).
 
 use std::collections::HashMap;
@@ -12,16 +12,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use pingora::services::background::BackgroundService;
 use rusqlite::Connection;
+use uuid::Uuid;
 
 // ============================================================================
 // Data Structures
 // ============================================================================
 
-/// Composite key for usage aggregation: (account_id, key_id, plan_id, minute_timestamp).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Composite key for usage aggregation: (account_id, api_key_id, plan_id, minute_timestamp).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageKey {
     pub account_id: i64,
-    pub key_id: i64,
+    pub api_key_id: Uuid,
     pub plan_id: i64,
     /// Unix timestamp truncated to the start of the minute.
     pub minute_ts: i64,
@@ -70,13 +71,13 @@ impl UsageTracker {
 
     /// Record a single request's usage.
     ///
-    /// - `account_id`, `key_id`, `plan_id`: identifiers from AccountStore
+    /// - `account_id`, `api_key_id`, `plan_id`: identifiers from AccountStore
     /// - `response_bytes`: size of the response body in bytes
     /// - `timestamp_secs`: Unix timestamp of the request (seconds since epoch)
     pub fn record(
         &self,
         account_id: i64,
-        key_id: i64,
+        api_key_id: Uuid,
         plan_id: i64,
         response_bytes: u64,
         timestamp_secs: i64,
@@ -86,7 +87,7 @@ impl UsageTracker {
 
         let key = UsageKey {
             account_id,
-            key_id,
+            api_key_id,
             plan_id,
             minute_ts,
         };
@@ -108,7 +109,7 @@ impl UsageTracker {
 
         data.retain(|key, record| {
             if key.minute_ts >= hour_ts && key.minute_ts < hour_end {
-                drained.push((*key, record.clone()));
+                drained.push((key.clone(), record.clone()));
                 false // remove from map
             } else {
                 true // keep in map
@@ -186,12 +187,12 @@ fn write_records_to_db(
         r#"
         CREATE TABLE IF NOT EXISTS Usage (
             account_id INTEGER NOT NULL,
-            key_id INTEGER NOT NULL,
+            api_key_id CHAR(36) NOT NULL,
             plan_id INTEGER NOT NULL,
             date_time DATETIME NOT NULL,
             total_requests INTEGER,
             total_data_mb REAL,
-            PRIMARY KEY (account_id, key_id, plan_id, date_time)
+            PRIMARY KEY (account_id, api_key_id, plan_id, date_time)
         );
         "#,
     )?;
@@ -199,9 +200,9 @@ fn write_records_to_db(
     // Insert or update records
     let mut stmt = conn.prepare(
         r#"
-        INSERT INTO Usage (account_id, key_id, plan_id, date_time, total_requests, total_data_mb)
+        INSERT INTO Usage (account_id, api_key_id, plan_id, date_time, total_requests, total_data_mb)
         VALUES (?1, ?2, ?3, datetime(?4, 'unixepoch'), ?5, ?6)
-        ON CONFLICT(account_id, key_id, plan_id, date_time)
+        ON CONFLICT(account_id, api_key_id, plan_id, date_time)
         DO UPDATE SET
             total_requests = total_requests + excluded.total_requests,
             total_data_mb = total_data_mb + excluded.total_data_mb
@@ -212,7 +213,7 @@ fn write_records_to_db(
         let data_mb = record.total_data_bytes as f64 / (1024.0 * 1024.0);
         stmt.execute(rusqlite::params![
             key.account_id,
-            key.key_id,
+            key.api_key_id.to_string(),
             key.plan_id,
             key.minute_ts,
             record.total_requests as i64,
@@ -327,12 +328,12 @@ impl UsageWriter {
             r#"
             CREATE TABLE IF NOT EXISTS Usage (
                 account_id INTEGER NOT NULL,
-                key_id INTEGER NOT NULL,
+                api_key_id CHAR(36) NOT NULL,
                 plan_id INTEGER NOT NULL,
                 date_time DATETIME NOT NULL,
                 total_requests INTEGER,
                 total_data_mb REAL,
-                PRIMARY KEY (account_id, key_id, plan_id, date_time)
+                PRIMARY KEY (account_id, api_key_id, plan_id, date_time)
             );
             "#,
         )?;
@@ -340,9 +341,9 @@ impl UsageWriter {
         // Insert or update records
         let mut stmt = conn.prepare(
             r#"
-            INSERT INTO Usage (account_id, key_id, plan_id, date_time, total_requests, total_data_mb)
+            INSERT INTO Usage (account_id, api_key_id, plan_id, date_time, total_requests, total_data_mb)
             VALUES (?1, ?2, ?3, datetime(?4, 'unixepoch'), ?5, ?6)
-            ON CONFLICT(account_id, key_id, plan_id, date_time)
+            ON CONFLICT(account_id, api_key_id, plan_id, date_time)
             DO UPDATE SET
                 total_requests = total_requests + excluded.total_requests,
                 total_data_mb = total_data_mb + excluded.total_data_mb
@@ -353,7 +354,7 @@ impl UsageWriter {
             let data_mb = record.total_data_bytes as f64 / (1024.0 * 1024.0);
             stmt.execute(rusqlite::params![
                 key.account_id,
-                key.key_id,
+                key.api_key_id.to_string(),
                 key.plan_id,
                 key.minute_ts,
                 record.total_requests as i64,
@@ -438,21 +439,27 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    const TEST_UUID: &str = "00000000-0000-0000-0000-000000000010";
+
+    fn test_uuid() -> Uuid {
+        Uuid::parse_str(TEST_UUID).unwrap()
+    }
+
     #[test]
     fn test_usage_tracker_record_increments_counts() {
         let tracker = UsageTracker::new();
 
         // Record 3 requests
-        tracker.record(1, 10, 100, 1024, 1000);
-        tracker.record(1, 10, 100, 2048, 1001);
-        tracker.record(1, 10, 100, 512, 1002);
+        tracker.record(1, test_uuid(), 100, 1024, 1000);
+        tracker.record(1, test_uuid(), 100, 2048, 1001);
+        tracker.record(1, test_uuid(), 100, 512, 1002);
 
         let records = tracker.drain_all();
         assert_eq!(records.len(), 1);
 
         let (key, record) = &records[0];
         assert_eq!(key.account_id, 1);
-        assert_eq!(key.key_id, 10);
+        assert_eq!(key.api_key_id, test_uuid());
         assert_eq!(key.plan_id, 100);
         assert_eq!(key.minute_ts, 960); // 1000 truncated to minute
         assert_eq!(record.total_requests, 3);
@@ -464,10 +471,10 @@ mod tests {
         let tracker = UsageTracker::new();
 
         // Record requests in different minutes
-        tracker.record(1, 10, 100, 100, 60); // minute 60
-        tracker.record(1, 10, 100, 100, 119); // minute 60
-        tracker.record(1, 10, 100, 100, 120); // minute 120
-        tracker.record(1, 10, 100, 100, 180); // minute 180
+        tracker.record(1, test_uuid(), 100, 100, 60); // minute 60
+        tracker.record(1, test_uuid(), 100, 100, 119); // minute 60
+        tracker.record(1, test_uuid(), 100, 100, 120); // minute 120
+        tracker.record(1, test_uuid(), 100, 100, 180); // minute 180
 
         let records = tracker.drain_all();
         assert_eq!(records.len(), 3);
@@ -488,13 +495,13 @@ mod tests {
         let tracker = UsageTracker::new();
 
         // Hour 0: timestamps 0-3599
-        tracker.record(1, 10, 100, 100, 0);
-        tracker.record(1, 10, 100, 100, 1800);
-        tracker.record(1, 10, 100, 100, 3599);
+        tracker.record(1, test_uuid(), 100, 100, 0);
+        tracker.record(1, test_uuid(), 100, 100, 1800);
+        tracker.record(1, test_uuid(), 100, 100, 3599);
 
         // Hour 1: timestamps 3600-7199
-        tracker.record(1, 10, 100, 100, 3600);
-        tracker.record(1, 10, 100, 100, 7199);
+        tracker.record(1, test_uuid(), 100, 100, 3600);
+        tracker.record(1, test_uuid(), 100, 100, 7199);
 
         // Drain hour 0
         let hour0_records = tracker.drain_hour(0);
@@ -516,7 +523,7 @@ mod tests {
         let writer = UsageWriter::new(tracker.clone(), temp_dir.path());
 
         // Record some data
-        tracker.record(1, 10, 100, 1024 * 1024, 3600); // 1 MB at hour 1
+        tracker.record(1, test_uuid(), 100, 1024 * 1024, 3600); // 1 MB at hour 1
 
         // Flush hour 1
         let count = writer.flush_hour(3600).unwrap();
@@ -529,13 +536,15 @@ mod tests {
         // Query the database
         let conn = Connection::open(&db_path).unwrap();
         let mut stmt = conn
-            .prepare("SELECT account_id, key_id, plan_id, total_requests, total_data_mb FROM Usage")
+            .prepare(
+                "SELECT account_id, api_key_id, plan_id, total_requests, total_data_mb FROM Usage",
+            )
             .unwrap();
         let mut rows = stmt.query([]).unwrap();
 
         let row = rows.next().unwrap().unwrap();
         assert_eq!(row.get::<_, i64>(0).unwrap(), 1); // account_id
-        assert_eq!(row.get::<_, i64>(1).unwrap(), 10); // key_id
+        assert_eq!(row.get::<_, String>(1).unwrap(), TEST_UUID); // api_key_id
         assert_eq!(row.get::<_, i64>(2).unwrap(), 100); // plan_id
         assert_eq!(row.get::<_, i64>(3).unwrap(), 1); // total_requests
         assert!((row.get::<_, f64>(4).unwrap() - 1.0).abs() < 0.001); // ~1 MB
@@ -548,8 +557,8 @@ mod tests {
         let writer = UsageWriter::new(tracker.clone(), temp_dir.path());
 
         // Records in hour 0 and hour 1
-        tracker.record(1, 10, 100, 100, 0);
-        tracker.record(1, 10, 100, 100, 3600);
+        tracker.record(1, test_uuid(), 100, 100, 0);
+        tracker.record(1, test_uuid(), 100, 100, 3600);
 
         let count = writer.flush_all().unwrap();
         assert_eq!(count, 2);
