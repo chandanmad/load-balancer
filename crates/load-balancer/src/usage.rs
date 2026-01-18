@@ -1,7 +1,7 @@
 //! API usage tracking with minute-level granularity and hourly SQLite dumps.
 //!
 //! This module captures per-request metrics (request count, response data size) grouped by
-//! (account_id, api_key_id, plan_id, minute). Every hour, the data is flushed to a timestamped
+//! (account_id, api_key, plan_id, minute). Every hour, the data is flushed to a timestamped
 //! SQLite database file (`usage-<YYYYMMDDHH>.db`).
 
 use std::collections::HashMap;
@@ -18,11 +18,11 @@ use uuid::Uuid;
 // Data Structures
 // ============================================================================
 
-/// Composite key for usage aggregation: (account_id, api_key_id, plan_id, minute_timestamp).
+/// Composite key for usage aggregation: (account_id, api_key, plan_id, minute_timestamp).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageKey {
     pub account_id: i64,
-    pub api_key_id: Uuid,
+    pub api_key: Uuid,
     pub plan_id: i64,
     /// Unix timestamp truncated to the start of the minute.
     pub minute_ts: i64,
@@ -71,13 +71,13 @@ impl UsageTracker {
 
     /// Record a single request's usage.
     ///
-    /// - `account_id`, `api_key_id`, `plan_id`: identifiers from AccountStore
+    /// - `account_id`, `api_key`, `plan_id`: identifiers from AccountStore
     /// - `response_bytes`: size of the response body in bytes
     /// - `timestamp_secs`: Unix timestamp of the request (seconds since epoch)
     pub fn record(
         &self,
         account_id: i64,
-        api_key_id: Uuid,
+        api_key: Uuid,
         plan_id: i64,
         response_bytes: u64,
         timestamp_secs: i64,
@@ -87,7 +87,7 @@ impl UsageTracker {
 
         let key = UsageKey {
             account_id,
-            api_key_id,
+            api_key,
             plan_id,
             minute_ts,
         };
@@ -187,12 +187,12 @@ fn write_records_to_db(
         r#"
         CREATE TABLE IF NOT EXISTS Usage (
             account_id INTEGER NOT NULL,
-            api_key_id CHAR(36) NOT NULL,
+            api_key CHAR(36) NOT NULL,
             plan_id INTEGER NOT NULL,
             date_time DATETIME NOT NULL,
             total_requests INTEGER,
             total_data_mb REAL,
-            PRIMARY KEY (account_id, api_key_id, plan_id, date_time)
+            PRIMARY KEY (account_id, api_key, plan_id, date_time)
         );
         "#,
     )?;
@@ -200,9 +200,9 @@ fn write_records_to_db(
     // Insert or update records
     let mut stmt = conn.prepare(
         r#"
-        INSERT INTO Usage (account_id, api_key_id, plan_id, date_time, total_requests, total_data_mb)
+        INSERT INTO Usage (account_id, api_key, plan_id, date_time, total_requests, total_data_mb)
         VALUES (?1, ?2, ?3, datetime(?4, 'unixepoch'), ?5, ?6)
-        ON CONFLICT(account_id, api_key_id, plan_id, date_time)
+        ON CONFLICT(account_id, api_key, plan_id, date_time)
         DO UPDATE SET
             total_requests = total_requests + excluded.total_requests,
             total_data_mb = total_data_mb + excluded.total_data_mb
@@ -213,7 +213,7 @@ fn write_records_to_db(
         let data_mb = record.total_data_bytes as f64 / (1024.0 * 1024.0);
         stmt.execute(rusqlite::params![
             key.account_id,
-            key.api_key_id.to_string(),
+            key.api_key.to_string(),
             key.plan_id,
             key.minute_ts,
             record.total_requests as i64,
@@ -328,12 +328,12 @@ impl UsageWriter {
             r#"
             CREATE TABLE IF NOT EXISTS Usage (
                 account_id INTEGER NOT NULL,
-                api_key_id CHAR(36) NOT NULL,
+                api_key CHAR(36) NOT NULL,
                 plan_id INTEGER NOT NULL,
                 date_time DATETIME NOT NULL,
                 total_requests INTEGER,
                 total_data_mb REAL,
-                PRIMARY KEY (account_id, api_key_id, plan_id, date_time)
+                PRIMARY KEY (account_id, api_key, plan_id, date_time)
             );
             "#,
         )?;
@@ -341,9 +341,9 @@ impl UsageWriter {
         // Insert or update records
         let mut stmt = conn.prepare(
             r#"
-            INSERT INTO Usage (account_id, api_key_id, plan_id, date_time, total_requests, total_data_mb)
+            INSERT INTO Usage (account_id, api_key, plan_id, date_time, total_requests, total_data_mb)
             VALUES (?1, ?2, ?3, datetime(?4, 'unixepoch'), ?5, ?6)
-            ON CONFLICT(account_id, api_key_id, plan_id, date_time)
+            ON CONFLICT(account_id, api_key, plan_id, date_time)
             DO UPDATE SET
                 total_requests = total_requests + excluded.total_requests,
                 total_data_mb = total_data_mb + excluded.total_data_mb
@@ -354,7 +354,7 @@ impl UsageWriter {
             let data_mb = record.total_data_bytes as f64 / (1024.0 * 1024.0);
             stmt.execute(rusqlite::params![
                 key.account_id,
-                key.api_key_id.to_string(),
+                key.api_key.to_string(),
                 key.plan_id,
                 key.minute_ts,
                 record.total_requests as i64,
@@ -459,7 +459,7 @@ mod tests {
 
         let (key, record) = &records[0];
         assert_eq!(key.account_id, 1);
-        assert_eq!(key.api_key_id, test_uuid());
+        assert_eq!(key.api_key, test_uuid());
         assert_eq!(key.plan_id, 100);
         assert_eq!(key.minute_ts, 960); // 1000 truncated to minute
         assert_eq!(record.total_requests, 3);
@@ -537,14 +537,14 @@ mod tests {
         let conn = Connection::open(&db_path).unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT account_id, api_key_id, plan_id, total_requests, total_data_mb FROM Usage",
+                "SELECT account_id, api_key, plan_id, total_requests, total_data_mb FROM Usage",
             )
             .unwrap();
         let mut rows = stmt.query([]).unwrap();
 
         let row = rows.next().unwrap().unwrap();
         assert_eq!(row.get::<_, i64>(0).unwrap(), 1); // account_id
-        assert_eq!(row.get::<_, String>(1).unwrap(), TEST_UUID); // api_key_id
+        assert_eq!(row.get::<_, String>(1).unwrap(), TEST_UUID); // api_key
         assert_eq!(row.get::<_, i64>(2).unwrap(), 100); // plan_id
         assert_eq!(row.get::<_, i64>(3).unwrap(), 1); // total_requests
         assert!((row.get::<_, f64>(4).unwrap() - 1.0).abs() < 0.001); // ~1 MB

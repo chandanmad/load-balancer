@@ -20,7 +20,8 @@ CREATE TABLE Accounts (
 
 -- Multiple keys per account
 CREATE TABLE APIKeys (
-    api_key_id CHAR(36) PRIMARY KEY,
+    api_key_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    api_key CHAR(36) UNIQUE NOT NULL,
     account_id INTEGER NOT NULL,
     api_key_hash TEXT UNIQUE NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT 1,
@@ -44,7 +45,6 @@ CREATE TRIGGER trg_plans_insert AFTER INSERT ON Plans BEGIN
 END;
 
 CREATE TRIGGER trg_plans_update AFTER UPDATE ON Plans BEGIN
-    UPDATE Plans SET updated_at = CURRENT_TIMESTAMP WHERE plan_id = NEW.plan_id;
     INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Plans', NEW.plan_id, 'UPDATE');
 END;
 
@@ -58,7 +58,6 @@ CREATE TRIGGER trg_accounts_insert AFTER INSERT ON Accounts BEGIN
 END;
 
 CREATE TRIGGER trg_accounts_update AFTER UPDATE ON Accounts BEGIN
-    UPDATE Accounts SET updated_at = CURRENT_TIMESTAMP WHERE account_id = NEW.account_id;
     INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('Accounts', NEW.account_id, 'UPDATE');
 END;
 
@@ -72,7 +71,6 @@ CREATE TRIGGER trg_apikeys_insert AFTER INSERT ON APIKeys BEGIN
 END;
 
 CREATE TRIGGER trg_apikeys_update AFTER UPDATE ON APIKeys BEGIN
-    UPDATE APIKeys SET updated_at = CURRENT_TIMESTAMP WHERE api_key_id = NEW.api_key_id;
     INSERT INTO ChangeLog (table_name, record_id, operation) VALUES ('APIKeys', NEW.api_key_id, 'UPDATE');
 END;
 
